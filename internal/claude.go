@@ -7,13 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 )
 
 var transientStreamPatterns = []string{
 	"socket connection was closed",
 	"connection reset by peer",
-	"api error",
 	"overloaded_error",
 	"rate_limit",
 }
@@ -103,7 +104,7 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 
 		waitErr := cmd.Wait()
 		if waitErr != nil {
-			if resultText != "" {
+			if resultText != "" && streamError == "" {
 				ch <- ClaudeStreamMsg{Done: true, Result: resultText, SessionID: sessionID}
 				return
 			}
@@ -523,91 +524,84 @@ func BuildPlanPrompt(messages []ChatMessage, projectDir string) string {
 	}, "\n")
 }
 
-func BuildAnalysisPrompt(specDir, projectDir, existingAnalysis string) string {
+func BuildAnalysisPrompt(specDir, projectDir string, hasExistingAnalysis bool) string {
 	slug := filepath.Base(specDir)
-	projectContext := loadProjectContext(filepath.Join(specDir, "mission"), projectDir)
+	missionDir := filepath.Join(specDir, "mission")
 
-	var specContent strings.Builder
-	specContent.WriteString(readFileContent(filepath.Join(specDir, "spec.md")))
+	filesToRead := []string{filepath.Join(specDir, "spec.md")}
 
-	if dp := readFileContent(filepath.Join(specDir, "design-prompt.md")); dp != "" {
-		specContent.WriteString("\n\n---\n\n## Design Prompt\n\n")
-		specContent.WriteString(dp)
+	if fileExists(filepath.Join(specDir, "design-prompt.md")) {
+		filesToRead = append(filesToRead, filepath.Join(specDir, "design-prompt.md"))
+	}
+	if fileExists(filepath.Join(specDir, "implementation-plan.md")) {
+		filesToRead = append(filesToRead, filepath.Join(specDir, "implementation-plan.md"))
+	}
+	if hasExistingAnalysis {
+		filesToRead = append(filesToRead, filepath.Join(missionDir, "codebase-analysis.md"))
 	}
 
-	if ip := readFileContent(filepath.Join(specDir, "implementation-plan.md")); ip != "" {
-		specContent.WriteString("\n\n---\n\n## Implementation Plan\n\n")
-		specContent.WriteString(ip)
+	var fileList strings.Builder
+	for i, f := range filesToRead {
+		fileList.WriteString(fmt.Sprintf("  %d. %s\n", i+1, f))
 	}
 
-	if existingAnalysis != "" {
+	if hasExistingAnalysis {
 		return strings.Join([]string{
+			"IMPORTANT: Do NOT narrate or explain what you are doing. Just act.",
+			"",
 			"You are a fast codebase scout doing a DELTA UPDATE of an existing analysis.",
 			"",
-			"## Project Overview",
+			"Read these files:",
+			fileList.String(),
+			"The last file is the existing analysis. The project's CLAUDE.md is already in your context.",
 			"",
-			projectContext,
-			"",
-			"## Spec: docs/specs/" + slug + "/",
-			"",
-			specContent.String(),
-			"",
-			"## Existing Analysis",
-			"",
-			existingAnalysis,
-			"",
-			"## Your Task",
-			"",
-			"The analysis above was generated previously. Compare it against the current spec and codebase:",
-			"",
-			"1. Verify the reference pattern still exists and is still the best match",
+			"Compare the existing analysis against the current spec and codebase:",
+			"1. Verify the reference pattern still exists and is the best match",
 			"2. Check if any files mentioned have changed or been removed",
-			"3. Identify anything NEW in the spec not covered by the existing analysis",
+			"3. Identify anything NEW in the spec not covered",
 			"",
-			"If the analysis is still accurate, output it as-is with a note saying 'validated, no changes needed'.",
-			"If updates are needed, output the FULL updated analysis (not just the diff).",
-			"",
-			"Be fast — only read files if you suspect something changed. Don't re-explore what's already documented.",
+			"If accurate, output it as-is. If updates needed, output the FULL updated analysis.",
+			"Be fast — only read files if you suspect something changed.",
 		}, "\n")
 	}
 
 	return strings.Join([]string{
-		"You are a fast codebase scout. Read the spec below, then find ONLY the files the planner needs to see.",
+		"IMPORTANT: Do NOT narrate or explain what you are doing. Just act.",
 		"",
-		"## Project Overview",
+		"You are a fast codebase scout for docs/specs/" + slug + "/.",
 		"",
-		projectContext,
+		"Read these files:",
+		fileList.String(),
+		"The project's CLAUDE.md is already in your context.",
 		"",
-		"## Spec: docs/specs/" + slug + "/",
-		"",
-		specContent.String(),
-		"",
-		"## Rules",
-		"",
-		"Be SURGICAL — do NOT explore broadly. The project context above already describes the stack, structure, and patterns.",
-		"You only need to find what is SPECIFIC to this spec:",
-		"",
-		"1. Find ONE existing feature that is most similar to what this spec requires — read its route, module barrel, and main component/service. That's the pattern reference.",
-		"2. Read the data model / types / schema relevant to this spec's domain (entities, API types, mock data).",
+		"Find ONLY what is SPECIFIC to this spec:",
+		"1. ONE existing feature most similar to what this spec requires — read its route, module barrel, and main component/service. That's the pattern reference.",
+		"2. Domain model: types, schemas, entities, API endpoints relevant to this spec.",
 		"3. If the spec mentions modifying existing files, read those files.",
 		"",
-		"Do NOT read: generic UI components, test setup files, config files, providers, utilities, CSS, stories, or anything the project context already covers.",
+		"Do NOT read: generic UI components, test setup files, config files, providers, utilities, CSS, stories.",
 		"",
-		"## Output",
-		"",
-		"A concise report with:",
-		"",
+		"Output a concise report with:",
 		"### Reference Pattern",
-		"The similar feature you found — file paths and key code snippets showing the structure.",
-		"",
+		"File paths and key code snippets showing the structure.",
 		"### Domain Model",
-		"Relevant types, schemas, entities, API endpoints for this spec's domain.",
-		"",
+		"Relevant types, schemas, entities, API endpoints.",
 		"### Files to Create/Modify",
-		"List with one-line explanation each. Be specific about paths following the existing pattern.",
+		"List with one-line explanation each. Be specific about paths.",
 		"",
-		"Keep it short. The planner is Opus — it can reason from a good reference, it doesn't need everything spelled out.",
+		"Keep it short. The planner is Opus — it can reason from a good reference.",
 	}, "\n")
+}
+
+func cleanAnalysisOutput(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "## ") || trimmed == "---" {
+			return strings.Join(lines[i:], "\n")
+		}
+	}
+	return text
 }
 
 func BuildSpecToPlanPrompt(specDir, projectDir, analysisPath string) string {
@@ -689,6 +683,7 @@ func BuildSpecToPlanPrompt(specDir, projectDir, analysisPath string) string {
 	return strings.Join(parts, "\n")
 }
 
+// Deprecated: kept for standalone testing. The pipeline uses BuildSkillPrompt instead.
 func BuildAssertionPrompt(specDir string) string {
 	slug := filepath.Base(specDir)
 
@@ -750,14 +745,24 @@ func BuildAssertionPrompt(specDir string) string {
 	}, "\n")
 }
 
-func BuildFeaturesOnlyPrompt(specDir string) string {
+// Deprecated: split into BuildAssertionsPrompt + BuildFeaturesPrompt for output cap safety.
+// Kept for standalone testing and migration fallback.
+func BuildSkillPrompt(specDir, projectDir string) string {
 	slug := filepath.Base(specDir)
 	missionDir := filepath.Join(specDir, "mission")
 
+	tmpFile, err := os.CreateTemp("", "spec-to-mission-*.md")
+	skillPath := ""
+	if err == nil {
+		tmpFile.WriteString(ReadSkill("spec-to-mission"))
+		tmpFile.Close()
+		skillPath = tmpFile.Name()
+	}
+
 	filesToRead := []string{
+		skillPath,
 		filepath.Join(specDir, "spec.md"),
 		filepath.Join(missionDir, "codebase-analysis.md"),
-		filepath.Join(missionDir, "validation-contract.md"),
 	}
 
 	if fileExists(filepath.Join(specDir, "design-prompt.md")) {
@@ -773,65 +778,640 @@ func BuildFeaturesOnlyPrompt(specDir string) string {
 	}
 
 	return strings.Join([]string{
-		"You are decomposing a spec into implementation features for docs/specs/" + slug + "/.",
+		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing. Just act.",
 		"",
-		"Read these files first:",
+		"Execute the spec-to-mission skill for docs/specs/" + slug + "/.",
+		"",
+		"Read these files:",
 		fileList.String(),
-		"File #1 is the spec. File #2 is a codebase analysis with patterns and domain model. File #3 is the validation contract with all assertions already derived.",
+		"File #1 is the skill — follow it exactly.",
+		"File #2 is the spec. File #3 is the codebase analysis.",
 		"",
-		"## Feature Decomposition Rules",
-		"",
-		"Break the spec into features. Quality of decomposition determines quality of execution.",
-		"",
-		"- Each feature completable in ONE worker session (1-3 functional requirements, 3-8 assertions).",
-		"- Each feature independently validatable — its assertions can be tested without other features (unless in depends_on).",
-		"- Order by dependency: schemas before hooks, hooks before components, infrastructure before consumers.",
-		"- Feature with >8 validation_refs is too big — split it.",
-		"- Feature with 0 validation_refs has unclear scope — every feature must be validatable.",
-		"- depends_on must be accurate — if F04 uses hooks from F03, declare it.",
-		"",
-		"Standard phase pattern:",
-		"  Phase 0 — Foundation: schemas, types, mock data (no dependencies)",
-		"  Phase 1 — Core: hooks, main page, forms (depends on Phase 0)",
-		"  Phase 2 — Integration: cross-cutting, sub-components (depends on Phase 1)",
-		"  Phase 3 — Polish: tests, stories, a11y compliance (depends on Phase 2)",
-		"",
-		"Feature scope must be SPECIFIC — detailed enough that a worker with NO prior context can implement it by reading only the scope + spec + validation contract.",
-		"",
-		"BAD: 'Implement step 1'",
-		"GOOD: 'RHF form with Zod resolver for EventBasicsSchema (name, slug, description). Auto-derive slug from name. Validation on required fields.'",
-		"",
-		"## Output",
-		"",
-		"Output ONLY a valid JSON object — no markdown, no explanation, no code fences.",
-		"",
-		`Schema: {"features":[{"id":"F01","title":"...","phase":0,"depends_on":[],"scope":"...","validation_refs":["data.1","data.2"]}]}`,
-		"",
-		"The validation_refs MUST reference assertion IDs from the validation contract (file #3). Every assertion should be referenced by at least one feature.",
+		"The project's CLAUDE.md is already in your context — do not read it again.",
+		"After reading all files, output ONLY the JSON object. No markdown, no code fences, no explanation.",
 	}, "\n")
 }
 
+// BuildAssertionsPrompt is Call 1 of the v2 pipeline: derive assertions only.
+// All inputs are inlined; the model must not use tools.
+func BuildAssertionsPrompt(specDir, projectDir string, retryFeedback string) string {
+	slug := filepath.Base(specDir)
+
+	skill := ReadSkill("spec-to-assertions")
+	spec := readFileContent(filepath.Join(specDir, "spec.md"))
+	designPrompt := readFileContent(filepath.Join(specDir, "design-prompt.md"))
+	implPlan := readFileContent(filepath.Join(specDir, "implementation-plan.md"))
+	constraints := extractSpecStructure(spec)
+
+	var parts []string
+	parts = append(parts,
+		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing.",
+		"All inputs are inlined below — do NOT use any tools (Read, Bash, Grep, etc.).",
+		"Output ONLY the JSON array of assertion groups. No markdown, no code fences, no prose.",
+		"",
+	)
+
+	if retryFeedback != "" {
+		parts = append(parts,
+			"## Previous attempt had coverage gaps. Fix these before re-emitting:",
+			"",
+			retryFeedback,
+			"",
+			"Re-emit the COMPLETE corrected JSON array (not a diff). Output ONLY JSON.",
+			"",
+		)
+	}
+
+	parts = append(parts,
+		"## Skill: spec-to-assertions",
+		"",
+		skill,
+		"",
+		"---",
+		"",
+		"## Target: docs/specs/"+slug+"/",
+		"",
+		"## Spec",
+		"",
+		spec,
+		"",
+	)
+
+	if designPrompt != "" {
+		parts = append(parts, "## Design Prompt", "", designPrompt, "")
+	}
+	if implPlan != "" {
+		parts = append(parts, "## Implementation Plan", "", implPlan, "")
+	}
+
+	if constraints != "" {
+		parts = append(parts,
+			"## Coverage Requirements (output MUST satisfy all)",
+			"",
+			constraints,
+			"",
+		)
+	}
+
+	parts = append(parts,
+		"## Output",
+		"",
+		`Output ONLY a JSON array of {"category","items"} objects. No prose, no fences.`,
+	)
+
+	return strings.Join(parts, "\n")
+}
+
+// BuildFeaturesPrompt is Call 2 of the v2 pipeline: features + knowledge.
+// Receives the assertion IDs produced by Call 1 and decomposes the spec into
+// features that reference them. All inputs are inlined.
+func BuildFeaturesPrompt(specDir, projectDir string, assertionIDs map[string][]string, retryFeedback string) string {
+	slug := filepath.Base(specDir)
+	missionDir := filepath.Join(specDir, "mission")
+
+	skill := ReadSkill("spec-to-features")
+	spec := readFileContent(filepath.Join(specDir, "spec.md"))
+	analysis := readFileContent(filepath.Join(missionDir, "codebase-analysis.md"))
+	designPrompt := readFileContent(filepath.Join(specDir, "design-prompt.md"))
+	implPlan := readFileContent(filepath.Join(specDir, "implementation-plan.md"))
+
+	var parts []string
+	parts = append(parts,
+		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing.",
+		"All inputs are inlined below — do NOT use any tools (Read, Bash, Grep, etc.).",
+		"Output ONLY the JSON object. No markdown, no code fences, no prose.",
+		"",
+	)
+
+	if retryFeedback != "" {
+		parts = append(parts,
+			"## Previous attempt had coverage gaps. Fix these before re-emitting:",
+			"",
+			retryFeedback,
+			"",
+			"Re-emit the COMPLETE corrected JSON object (not a diff). Output ONLY JSON.",
+			"",
+		)
+	}
+
+	parts = append(parts,
+		"## Skill: spec-to-features",
+		"",
+		skill,
+		"",
+		"---",
+		"",
+		"## Target: docs/specs/"+slug+"/",
+		"",
+		"## Spec",
+		"",
+		spec,
+		"",
+		"## Codebase Analysis",
+		"",
+		analysis,
+		"",
+	)
+
+	if designPrompt != "" {
+		parts = append(parts, "## Design Prompt", "", designPrompt, "")
+	}
+	if implPlan != "" {
+		parts = append(parts, "## Implementation Plan", "", implPlan, "")
+	}
+
+	parts = append(parts,
+		"## Assertion IDs to cover (already authored — bucket them into features)",
+		"",
+		formatAssertionIDList(assertionIDs),
+		"",
+		"## Decomposition Requirements (output MUST satisfy all)",
+		"",
+		"- Every assertion ID above MUST be referenced by >=1 feature.validation_refs",
+		"- Every feature MUST have non-empty scope (>=80 chars) describing schemas, validation, file paths",
+		"- Every feature MUST have >=1 validation_refs entry",
+		"- Order features by phase: 0 (foundation: schemas/types/fixtures) -> 1 (core: hooks/page/forms) -> 2 (integration) -> 3 (polish: a11y/perf/tests)",
+		"- depends_on must list the IDs of features producing code this one consumes",
+		"- DO NOT include a 'knowledge' field — knowledge is generated by a separate downstream phase that will see your features.json",
+		"",
+		"## Output",
+		"",
+		`Output ONLY a JSON object {"features":[...]}. No 'knowledge' field. No prose, no fences.`,
+	)
+
+	return strings.Join(parts, "\n")
+}
+
+// BuildKnowledgePromptV2 is Phase Knowledge of the v3 pipeline: synthesizes
+// actionable knowledge entries from spec + analysis + already-decomposed
+// features. Runs after Features so knowledge can anchor to specific feature
+// IDs and scopes. Designed for sonnet (cheaper, faster, sufficient quality).
+func BuildKnowledgePromptV2(specDir, projectDir string, features []Feature, retryFeedback string) string {
+	slug := filepath.Base(specDir)
+	missionDir := filepath.Join(specDir, "mission")
+
+	skill := ReadSkill("spec-to-knowledge")
+	spec := readFileContent(filepath.Join(specDir, "spec.md"))
+	analysis := readFileContent(filepath.Join(missionDir, "codebase-analysis.md"))
+	contract := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
+	designPrompt := readFileContent(filepath.Join(specDir, "design-prompt.md"))
+	implPlan := readFileContent(filepath.Join(specDir, "implementation-plan.md"))
+
+	var parts []string
+	parts = append(parts,
+		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing.",
+		"All inputs are inlined below — do NOT use any tools (Read, Bash, Grep, etc.).",
+		"Output ONLY the JSON array of strings. No markdown, no code fences, no prose.",
+		"",
+	)
+
+	if retryFeedback != "" {
+		parts = append(parts,
+			"## Previous attempt had quality gaps. Fix these before re-emitting:",
+			"",
+			retryFeedback,
+			"",
+			"Re-emit the COMPLETE corrected JSON array (not a diff). Output ONLY JSON.",
+			"",
+		)
+	}
+
+	parts = append(parts,
+		"## Skill: spec-to-knowledge",
+		"",
+		skill,
+		"",
+		"---",
+		"",
+		"## Target: docs/specs/"+slug+"/",
+		"",
+		"## Spec",
+		"",
+		spec,
+		"",
+		"## Codebase Analysis",
+		"",
+		analysis,
+		"",
+		"## Features (already decomposed — reference these in your knowledge)",
+		"",
+		formatFeaturesForKnowledge(features),
+		"",
+	)
+
+	if contract != "" {
+		parts = append(parts,
+			"## Validation Contract (already authored)",
+			"",
+			contract,
+			"",
+		)
+	}
+
+	if designPrompt != "" {
+		parts = append(parts, "## Design Prompt", "", designPrompt, "")
+	}
+	if implPlan != "" {
+		parts = append(parts, "## Implementation Plan", "", implPlan, "")
+	}
+
+	parts = append(parts,
+		"## Synthesis Requirements (output MUST satisfy all)",
+		"",
+		"- Output a JSON array of strings — top-level array, NO {} wrapper",
+		"- Target 8–18 entries; >25 is dilution",
+		"- Each entry actionable: a worker takes a different action after reading it",
+		"- Each entry 60–200 chars, complete sentence or punctuation-terminated phrase",
+		"- No paraphrasing of the spec; no generic 'use TypeScript' / 'write tests'",
+		"- Anchor entries to specific features when possible (mention pattern, schema, file path)",
+		"",
+		"## Output",
+		"",
+		`Output ONLY a JSON array of strings. No object wrapper, no prose, no fences.`,
+	)
+
+	return strings.Join(parts, "\n")
+}
+
+// formatFeaturesForKnowledge renders the feature list compactly so the
+// knowledge model can reference IDs and scope without re-deriving.
+func formatFeaturesForKnowledge(features []Feature) string {
+	if len(features) == 0 {
+		return "(no features provided)"
+	}
+	var b strings.Builder
+	for _, f := range features {
+		fid := strings.TrimSpace(f.ID)
+		if fid == "" {
+			fid = f.Title
+		}
+		b.WriteString("- ")
+		b.WriteString(fid)
+		if title := strings.TrimSpace(f.Title); title != "" {
+			b.WriteString(" — ")
+			b.WriteString(title)
+		}
+		if scope := strings.TrimSpace(f.Scope); scope != "" {
+			b.WriteString("\n    scope: ")
+			b.WriteString(truncatePreview(scope, 240))
+		}
+		if len(f.ValidationRefs) > 0 {
+			b.WriteString("\n    refs: ")
+			b.WriteString(strings.Join(f.ValidationRefs, ", "))
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatAssertionIDList renders the per-category map as a readable block:
+//
+//	ui: ui.1, ui.2, ui.3
+//	data: data.1, data.2
+func formatAssertionIDList(ids map[string][]string) string {
+	if len(ids) == 0 {
+		return "(no assertion IDs provided)"
+	}
+	categories := make([]string, 0, len(ids))
+	for k := range ids {
+		categories = append(categories, k)
+	}
+	sort.Strings(categories)
+
+	var b strings.Builder
+	for _, cat := range categories {
+		items := ids[cat]
+		if len(items) == 0 {
+			continue
+		}
+		b.WriteString(cat)
+		b.WriteString(": ")
+		b.WriteString(strings.Join(items, ", "))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// extractSpecStructure produces a coverage-requirements block derived from the
+// spec.md content. Used to constrain the assertions call so the model cannot
+// silently drop FRs, NFRs, or endpoints.
+func extractSpecStructure(spec string) string {
+	if spec == "" {
+		return ""
+	}
+
+	frs := extractNumberedSection(spec, "Functional Requirements")
+	nfrs := extractNumberedSection(spec, "Non-Functional Requirements")
+	if len(nfrs) == 0 {
+		nfrs = extractBulletSection(spec, "Non-Functional Requirements")
+	}
+	endpoints := extractAPIEndpoints(spec)
+
+	var b strings.Builder
+
+	if len(frs) > 0 {
+		b.WriteString(fmt.Sprintf("- Every FR (FR1..FR%d) MUST map to >=1 assertion in some category. FRs:\n", len(frs)))
+		for i, fr := range frs {
+			b.WriteString(fmt.Sprintf("  FR%d: %s\n", i+1, truncatePreview(fr, 120)))
+		}
+	}
+
+	if len(nfrs) > 0 {
+		b.WriteString("- Every NFR below MUST map to >=1 assertion (a11y/perf/error/security/telemetry/auth as applicable):\n")
+		for i, nfr := range nfrs {
+			b.WriteString(fmt.Sprintf("  NFR%d: %s\n", i+1, truncatePreview(nfr, 120)))
+		}
+	}
+
+	if len(endpoints) > 0 {
+		b.WriteString("- Every API endpoint below MUST have >=1 happy-path AND >=1 error-path api.* assertion:\n")
+		for _, ep := range endpoints {
+			b.WriteString("  ")
+			b.WriteString(ep)
+			b.WriteString("\n")
+		}
+	}
+
+	if b.Len() == 0 {
+		return ""
+	}
+
+	b.WriteString("- Output ONLY a JSON array of {category, items} objects. No prose, no fences.\n")
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// extractNumberedSection pulls items from a "1.", "2.", ... numbered list under
+// a "## <header>" markdown section. Returns trimmed item bodies (header digit
+// stripped). Multi-line items are joined with single spaces.
+func extractNumberedSection(spec, header string) []string {
+	if spec == "" || header == "" {
+		return nil
+	}
+	pattern := `(?ms)^##\s+` + regexp.QuoteMeta(header) + `\s*$\s*\n(.*?)(?:^##\s|\z)`
+	re := regexp.MustCompile(pattern)
+	m := re.FindStringSubmatch(spec)
+	if len(m) < 2 {
+		return nil
+	}
+	section := m[1]
+
+	itemRe := regexp.MustCompile(`^\s*\d+\.\s+`)
+	var items []string
+	var current strings.Builder
+	for _, line := range strings.Split(section, "\n") {
+		if itemRe.MatchString(line) {
+			if current.Len() > 0 {
+				items = append(items, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			current.WriteString(itemRe.ReplaceAllString(line, ""))
+		} else if current.Len() > 0 {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" {
+				current.WriteString(" ")
+				current.WriteString(trimmed)
+			}
+		}
+	}
+	if current.Len() > 0 {
+		items = append(items, strings.TrimSpace(current.String()))
+	}
+	return items
+}
+
+// extractBulletSection is a fallback for sections (typically NFRs) that use
+// "- " bullets instead of numbered items. Captures one entry per top-level
+// bullet, ignoring nested bullets and bold-prefixed labels.
+func extractBulletSection(spec, header string) []string {
+	if spec == "" || header == "" {
+		return nil
+	}
+	pattern := `(?ms)^##\s+` + regexp.QuoteMeta(header) + `\s*$\s*\n(.*?)(?:^##\s|\z)`
+	re := regexp.MustCompile(pattern)
+	m := re.FindStringSubmatch(spec)
+	if len(m) < 2 {
+		return nil
+	}
+	section := m[1]
+
+	bulletRe := regexp.MustCompile(`^-\s+`)
+	var items []string
+	var current strings.Builder
+	for _, line := range strings.Split(section, "\n") {
+		if bulletRe.MatchString(line) {
+			if current.Len() > 0 {
+				items = append(items, strings.TrimSpace(current.String()))
+				current.Reset()
+			}
+			current.WriteString(bulletRe.ReplaceAllString(line, ""))
+		} else if current.Len() > 0 {
+			trimmed := strings.TrimSpace(line)
+			// Skip nested bullets to keep top-level entries tight.
+			if strings.HasPrefix(trimmed, "-") {
+				continue
+			}
+			if trimmed != "" {
+				current.WriteString(" ")
+				current.WriteString(trimmed)
+			}
+		}
+	}
+	if current.Len() > 0 {
+		items = append(items, strings.TrimSpace(current.String()))
+	}
+	return items
+}
+
+// extractAPIEndpoints scans the entire spec for HTTP method + path pairs.
+// Deduplicates results while preserving first-seen order.
+func extractAPIEndpoints(spec string) []string {
+	if spec == "" {
+		return nil
+	}
+	re := regexp.MustCompile("(?m)\\b(GET|POST|PUT|PATCH|DELETE)\\s+(/[^\\s`\"',()]+)")
+	matches := re.FindAllStringSubmatch(spec, -1)
+	seen := make(map[string]bool)
+	var endpoints []string
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		key := m[1] + " " + m[2]
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		endpoints = append(endpoints, key)
+	}
+	return endpoints
+}
+
+func truncatePreview(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func compactContract(contractPath string) string {
+	assertions := parseAssertionsFromContract(contractPath)
+	if len(assertions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, a := range assertions {
+		b.WriteString(fmt.Sprintf("### %s\n", a.Category))
+		for _, item := range a.Items {
+			parts := strings.SplitN(item, ":", 2)
+			if len(parts) == 2 {
+				id := strings.TrimSpace(parts[0])
+				desc := strings.TrimSpace(parts[1])
+				if idx := strings.Index(desc, ". "); idx > 0 && idx < 120 {
+					desc = desc[:idx+1]
+				} else if len(desc) > 120 {
+					desc = desc[:120] + "..."
+				}
+				b.WriteString(fmt.Sprintf("- %s: %s\n", id, desc))
+			} else {
+				short := item
+				if len(short) > 120 {
+					short = short[:120] + "..."
+				}
+				b.WriteString(fmt.Sprintf("- %s\n", short))
+			}
+		}
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func CompactKnowledge(knowledge string) string {
+	if knowledge == "" {
+		return ""
+	}
+
+	var entries []string
+	inHowTo := false
+	seenEntry := false
+
+	for _, line := range strings.Split(knowledge, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		if strings.HasPrefix(trimmed, "# ") {
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "## How to contribute") {
+			inHowTo = true
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "## ") {
+			inHowTo = false
+			continue
+		}
+
+		if trimmed == "---" {
+			inHowTo = false
+			continue
+		}
+
+		if inHowTo {
+			continue
+		}
+
+		if trimmed == "" {
+			continue
+		}
+
+		if !seenEntry && !strings.HasPrefix(trimmed, "- ") {
+			continue
+		}
+
+		seenEntry = true
+		entries = append(entries, trimmed)
+	}
+
+	if len(entries) == 0 {
+		return knowledge
+	}
+
+	return strings.Join(entries, "\n")
+}
+
+// Deprecated: kept for standalone testing. The pipeline uses BuildSkillPrompt instead.
+func BuildFeaturesOnlyPrompt(specDir string) string {
+	slug := filepath.Base(specDir)
+	missionDir := filepath.Join(specDir, "mission")
+
+	skill := ReadSkill("feature-decomposer")
+	contract := compactContract(filepath.Join(missionDir, "validation-contract.md"))
+	spec := readFileContent(filepath.Join(specDir, "spec.md"))
+	analysis := readFileContent(filepath.Join(missionDir, "codebase-analysis.md"))
+
+	var parts []string
+	parts = append(parts,
+		skill,
+		"",
+		"## Target: docs/specs/"+slug+"/",
+		"",
+		"ALL inputs are provided below. Do NOT use Read or any tools. Output ONLY the JSON.",
+		"",
+		"## Spec",
+		"",
+		spec,
+		"",
+		"## Codebase Analysis",
+		"",
+		analysis,
+		"",
+	)
+
+	if dp := readFileContent(filepath.Join(specDir, "design-prompt.md")); dp != "" {
+		parts = append(parts, "## Design Prompt", "", dp, "")
+	}
+	if ip := readFileContent(filepath.Join(specDir, "implementation-plan.md")); ip != "" {
+		parts = append(parts, "## Implementation Plan", "", ip, "")
+	}
+
+	parts = append(parts,
+		"## Assertion IDs (for validation_refs)",
+		"",
+		contract,
+		"Output ONLY the features JSON now.",
+	)
+
+	return strings.Join(parts, "\n")
+}
+
+// Deprecated: kept for standalone testing. The pipeline uses BuildSkillPrompt instead.
 func BuildKnowledgePrompt(specDir string) string {
 	slug := filepath.Base(specDir)
 	missionDir := filepath.Join(specDir, "mission")
 
-	filesToRead := []string{
-		filepath.Join(specDir, "spec.md"),
-		filepath.Join(missionDir, "codebase-analysis.md"),
-		filepath.Join(missionDir, "validation-contract.md"),
-	}
-
-	var fileList strings.Builder
-	for i, f := range filesToRead {
-		fileList.WriteString(fmt.Sprintf("  %d. %s\n", i+1, f))
-	}
+	spec := readFileContent(filepath.Join(specDir, "spec.md"))
+	analysis := readFileContent(filepath.Join(missionDir, "codebase-analysis.md"))
+	contract := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
 
 	return strings.Join([]string{
 		"You are building the initial knowledge base for a mission on docs/specs/" + slug + "/.",
 		"",
-		"Read these files first:",
-		fileList.String(),
-		"File #1 is the spec. File #2 is a codebase analysis. File #3 is the validation contract.",
+		"ALL artifacts are provided below. Do NOT use Read, Glob, Grep, Bash, or any tools.",
+		"Start extracting knowledge IMMEDIATELY and output ONLY the JSON result.",
+		"",
+		"## Spec",
+		"",
+		spec,
+		"",
+		"## Codebase Analysis",
+		"",
+		analysis,
+		"",
+		"## Validation Contract",
+		"",
+		contract,
 		"",
 		"## Knowledge Base Purpose",
 		"",
@@ -912,6 +1492,7 @@ func BuildRegenPlanPrompt(specDir, missionDir, projectDir string) string {
 		"8. Re-derive validation assertions from the CURRENT spec. Keep assertion IDs stable for done features.",
 		"9. Maintain correct dependency ordering and phase assignments.",
 		"10. Update knowledge base entries if the spec changes invalidate any prior findings.",
+		"11. Preserve fix lineage: do not rename or reuse IDs from existing fix_features; avoid introducing IDs that collide with existing features/fixes.",
 		"",
 		"## Output",
 		"",
@@ -1049,6 +1630,7 @@ func BuildEditPlanPrompt(messages []ChatMessage, specDir, projectDir string) str
 		"- ADD new features with IDs continuing from the existing sequence",
 		"- UPDATE assertions: keep existing ones, add new ones as needed",
 		"- New features must have validation_refs pointing to assertions",
+		"- Preserve fix lineage from existing features.json; do not reuse IDs that collide with existing features or fix_features",
 		"- Output ONLY the JSON object, nothing else",
 	}, "\n")
 }
@@ -1092,10 +1674,11 @@ func BuildWorkerPrompt(feature Feature, siblings []string, contract, knowledge, 
 	}
 
 	if contract != "" {
-		parts = append(parts, "", "## Validation Contract", "", contract)
+		filtered := FilterContractAssertions(contract, feature.ValidationRefs)
+		parts = append(parts, "", "## Validation Contract", "", filtered)
 	}
 	if knowledge != "" {
-		parts = append(parts, "", "## Project Knowledge", "", knowledge)
+		parts = append(parts, "", "## Project Knowledge", "", CompactKnowledge(knowledge))
 	}
 
 	if failureContext != "" {

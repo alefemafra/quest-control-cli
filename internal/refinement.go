@@ -18,6 +18,14 @@ func BuildRefinementPrompt(feature Feature, report ValidatorReport, missionDir, 
 
 	reportJSON, _ := json.MarshalIndent(report, "", "  ")
 
+	var failedRefs []string
+	for _, a := range report.Assertions {
+		if a.Result == "FAIL" || a.Result == "BLOCKED" {
+			failedRefs = append(failedRefs, a.ID)
+		}
+	}
+	filteredContract := FilterContractAssertions(contract, failedRefs)
+
 	var parts []string
 	parts = append(parts,
 		"You are running the mission-refinement skill. Follow it precisely.",
@@ -43,14 +51,14 @@ func BuildRefinementPrompt(feature Feature, report ValidatorReport, missionDir, 
 		"",
 		string(reportJSON),
 		"",
-		"## Validation Contract",
+		"## Validation Contract (failed assertions)",
 		"",
-		contract,
+		filteredContract,
 		"",
 	)
 
 	if knowledge != "" {
-		parts = append(parts, "## Knowledge Base", "", knowledge, "")
+		parts = append(parts, "## Knowledge Base", "", CompactKnowledge(knowledge), "")
 	}
 
 	parts = append(parts,
@@ -129,9 +137,26 @@ func AddFixFeatures(missionDir string, fixes []Feature, originalID string, fileM
 		return err
 	}
 
+	rootIDs := make(map[string]struct{}, len(manifest.Features))
+	for _, f := range manifest.Features {
+		rootIDs[f.ID] = struct{}{}
+	}
+
+	normalizedFixes, err := normalizeFixFeatures(manifest.FixFeatures, rootIDs)
+	if err != nil {
+		return err
+	}
+	manifest.FixFeatures = normalizedFixes
+
+	// Original feature may be either a root feature or a fix feature (nested refinements).
 	for i := range manifest.Features {
 		if manifest.Features[i].ID == originalID {
 			manifest.Features[i].Status = "blocked"
+		}
+	}
+	for i := range manifest.FixFeatures {
+		if manifest.FixFeatures[i].ID == originalID {
+			manifest.FixFeatures[i].Status = "blocked"
 		}
 	}
 
@@ -139,12 +164,163 @@ func AddFixFeatures(missionDir string, fixes []Feature, originalID string, fileM
 		if fixes[i].Status == "" {
 			fixes[i].Status = "pending"
 		}
+
+		if _, collidesWithRoot := rootIDs[fixes[i].ID]; collidesWithRoot {
+			return fmt.Errorf("fix id %q collides with root feature id", fixes[i].ID)
+		}
 	}
-	manifest.FixFeatures = append(manifest.FixFeatures, fixes...)
+
+	indexByID := make(map[string]int, len(manifest.FixFeatures))
+	for i := range manifest.FixFeatures {
+		indexByID[manifest.FixFeatures[i].ID] = i
+	}
+
+	for _, fix := range fixes {
+		if idx, exists := indexByID[fix.ID]; exists {
+			manifest.FixFeatures[idx] = mergeFixFeatureEntries(manifest.FixFeatures[idx], fix)
+			continue
+		}
+
+		manifest.FixFeatures = append(manifest.FixFeatures, fix)
+		indexByID[fix.ID] = len(manifest.FixFeatures) - 1
+	}
+
+	if err := validateUniqueFeatureIDs(manifest.Features, manifest.FixFeatures); err != nil {
+		return err
+	}
 
 	out, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(path, out, 0o644)
+}
+
+func normalizeFixFeatures(fixes []Feature, rootIDs map[string]struct{}) ([]Feature, error) {
+	if len(fixes) == 0 {
+		return nil, nil
+	}
+
+	seen := make(map[string]int, len(fixes))
+	normalized := make([]Feature, 0, len(fixes))
+
+	for _, f := range fixes {
+		if f.ID == "" {
+			return nil, fmt.Errorf("fix feature with empty id")
+		}
+		if _, collidesWithRoot := rootIDs[f.ID]; collidesWithRoot {
+			return nil, fmt.Errorf("fix id %q collides with root feature id", f.ID)
+		}
+
+		if idx, exists := seen[f.ID]; exists {
+			normalized[idx] = mergeFixFeatureEntries(normalized[idx], f)
+			continue
+		}
+
+		seen[f.ID] = len(normalized)
+		normalized = append(normalized, f)
+	}
+
+	return normalized, nil
+}
+
+func mergeFixFeatureEntries(base Feature, incoming Feature) Feature {
+	merged := base
+
+	if incoming.Title != "" {
+		merged.Title = incoming.Title
+	}
+	if incoming.Phase != 0 || base.Phase == 0 {
+		merged.Phase = incoming.Phase
+	}
+	if len(incoming.DependsOn) > 0 {
+		merged.DependsOn = incoming.DependsOn
+	}
+	if incoming.Scope != "" {
+		merged.Scope = incoming.Scope
+	}
+	if len(incoming.ValidationRefs) > 0 {
+		merged.ValidationRefs = incoming.ValidationRefs
+	}
+	if incoming.Fixes != "" {
+		merged.Fixes = incoming.Fixes
+	}
+	if len(incoming.Addresses) > 0 {
+		merged.Addresses = incoming.Addresses
+	}
+	if incoming.Resolution != "" {
+		merged.Resolution = incoming.Resolution
+	}
+	if incoming.ResolvedBy != "" {
+		merged.ResolvedBy = incoming.ResolvedBy
+	}
+	if incoming.ResolvedAt != "" {
+		merged.ResolvedAt = incoming.ResolvedAt
+	}
+	if incoming.Tainted {
+		merged.Tainted = true
+	}
+
+	merged.Status = pickHigherPriorityStatus(base.Status, incoming.Status)
+	return merged
+}
+
+func pickHigherPriorityStatus(a, b string) string {
+	if b == "" {
+		return a
+	}
+	if a == "" {
+		return b
+	}
+
+	priority := map[string]int{
+		"pending":             0,
+		"in_progress":         1,
+		"awaiting_validation": 2,
+		"validating":          3,
+		"refining":            4,
+		"blocked":             5,
+		"done":                6,
+		"validated":           6,
+	}
+
+	pa, okA := priority[a]
+	pb, okB := priority[b]
+	if !okA {
+		pa = -1
+	}
+	if !okB {
+		pb = -1
+	}
+
+	if pb > pa {
+		return b
+	}
+	return a
+}
+
+func validateUniqueFeatureIDs(features []Feature, fixFeatures []Feature) error {
+	seen := make(map[string]string, len(features)+len(fixFeatures))
+
+	for _, f := range features {
+		if f.ID == "" {
+			return fmt.Errorf("feature with empty id")
+		}
+		if prev, exists := seen[f.ID]; exists {
+			return fmt.Errorf("duplicate feature id %q in %s and features", f.ID, prev)
+		}
+		seen[f.ID] = "features"
+	}
+
+	for _, f := range fixFeatures {
+		if f.ID == "" {
+			return fmt.Errorf("fix feature with empty id")
+		}
+		if prev, exists := seen[f.ID]; exists {
+			return fmt.Errorf("duplicate feature id %q in %s and fix_features", f.ID, prev)
+		}
+		seen[f.ID] = "fix_features"
+	}
+
+	return nil
 }

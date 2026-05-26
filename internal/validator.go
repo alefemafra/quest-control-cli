@@ -63,7 +63,7 @@ func BuildValidatorPrompt(feature Feature, missionDir, specDir string) string {
 		parts = append(parts, "## CLAUDE.md", "", claudeMd, "")
 	}
 	if knowledge != "" {
-		parts = append(parts, "## Knowledge Base", "", knowledge, "")
+		parts = append(parts, "## Knowledge Base", "", CompactKnowledge(knowledge), "")
 	}
 
 	parts = append(parts,

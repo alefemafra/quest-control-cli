@@ -28,6 +28,7 @@ var transientPatterns = []string{
 }
 
 const maxTransientRetries = 5
+const defaultMaxFixAttemptsPerRoot = 20
 
 func isTransientError(err error) bool {
 	if err == nil {
@@ -45,13 +46,13 @@ func isTransientError(err error) bool {
 type WorkerStatus string
 
 const (
-	WorkerPending             WorkerStatus = "pending"
-	WorkerRunning             WorkerStatus = "running"
-	WorkerDone                WorkerStatus = "done"
-	WorkerFailed              WorkerStatus = "failed"
-	WorkerAwaitingValidation  WorkerStatus = "awaiting_validation"
-	WorkerValidating          WorkerStatus = "validating"
-	WorkerRefining            WorkerStatus = "refining"
+	WorkerPending            WorkerStatus = "pending"
+	WorkerRunning            WorkerStatus = "running"
+	WorkerDone               WorkerStatus = "done"
+	WorkerFailed             WorkerStatus = "failed"
+	WorkerAwaitingValidation WorkerStatus = "awaiting_validation"
+	WorkerValidating         WorkerStatus = "validating"
+	WorkerRefining           WorkerStatus = "refining"
 )
 
 type FeatureWorker struct {
@@ -66,27 +67,31 @@ type FeatureWorker struct {
 }
 
 type WorkerPool struct {
-	projectDir      string
-	missionDir      string
-	workers         map[string]*FeatureWorker
-	phases          map[int][]string
-	logger          *MissionLogger
-	eventCh         chan WorkerEvent
-	mu              sync.Mutex
-	fileMu          sync.Mutex
-	stopped         bool
-	verbose         *bool
-	retries            map[string]int
-	maxRetries         int
-	transientRetries   map[string]int
-	validatorRetries   map[string]int
+	projectDir          string
+	missionDir          string
+	workers             map[string]*FeatureWorker
+	phases              map[int][]string
+	logger              *MissionLogger
+	eventCh             chan WorkerEvent
+	mu                  sync.Mutex
+	fileMu              sync.Mutex
+	stopped             bool
+	verbose             *bool
+	retries             map[string]int
+	maxRetries          int
+	transientRetries    map[string]int
+	validatorRetries    map[string]int
 	maxValidatorRetries int
-	refinementCount  map[string]int
-	maxRefinements   int
-	phaseRetries     map[int]int
-	maxPhaseRetries  int
-	criticDone       bool
-	criticPassed     bool
+	refinementCount     map[string]int
+	maxRefinements      int
+	phaseRetries        map[int]int
+	maxPhaseRetries     int
+	criticDone          bool
+	criticPassed        bool
+	skipCritic          bool
+	tainted             map[string]bool
+	fixAttemptsByRoot   map[string]int
+	maxFixAttempts      int
 }
 
 func NewWorkerPool(projectDir, missionDir string, features []Feature, logger *MissionLogger, verbose *bool) *WorkerPool {
@@ -118,6 +123,9 @@ func NewWorkerPool(projectDir, missionDir string, features []Feature, logger *Mi
 		maxRefinements:      3,
 		phaseRetries:        make(map[int]int),
 		maxPhaseRetries:     1,
+		tainted:             loadTaintedFeatureIDs(missionDir, features),
+		fixAttemptsByRoot:   loadFixAttemptBudgets(missionDir, features),
+		maxFixAttempts:      defaultMaxFixAttemptsPerRoot,
 	}
 }
 
@@ -134,39 +142,48 @@ func (wp *WorkerPool) Start() tea.Cmd {
 	contract := readFileContent(filepath.Join(wp.missionDir, "validation-contract.md"))
 
 	go func() {
-		wp.logger.Log("", "Running critic gate before workers...")
+		if !wp.skipCritic {
+			wp.logger.Log("", "Running critic gate before workers...")
 
-		criticCh := make(chan WorkerEvent, 64)
-		go RunCriticGate(wp.projectDir, wp.missionDir, wp.verbose, criticCh)
+			criticCh := make(chan WorkerEvent, 64)
+			go RunCriticGate(wp.projectDir, wp.missionDir, wp.verbose, criticCh)
 
-		var passed bool
-		for ev := range criticCh {
-			wp.eventCh <- ev
-			if ev.Done && ev.Role == "critic" {
-				passed = ev.Verdict == "PASS"
-				break
+			var passed bool
+			for ev := range criticCh {
+				wp.eventCh <- ev
+				if ev.Done && ev.Role == "critic" {
+					passed = ev.Verdict == "PASS"
+					break
+				}
 			}
-		}
 
-		wp.mu.Lock()
-		wp.criticDone = true
-		wp.criticPassed = passed
-		if wp.stopped {
+			wp.mu.Lock()
+			wp.criticDone = true
+			wp.criticPassed = passed
+			if wp.stopped {
+				wp.mu.Unlock()
+				return
+			}
 			wp.mu.Unlock()
-			return
-		}
-		wp.mu.Unlock()
 
-		if !passed {
-			wp.logger.Log("", "Critic gate failed — workers will not start")
-			wp.eventCh <- WorkerEvent{
-				AllDone: true,
-				Line:    "✕ Critic gate failed — fix issues and retry",
+			if !passed {
+				wp.logger.Log("", "Critic gate failed — workers will not start")
+				wp.eventCh <- WorkerEvent{
+					AllDone: true,
+					Line:    "✕ Critic gate failed — fix issues and retry",
+				}
+				return
 			}
-			return
+
+			wp.logger.Log("", "Critic gate passed — starting workers")
+		} else {
+			wp.logger.Log("", "Critic gate skipped — starting workers directly")
+			wp.eventCh <- WorkerEvent{
+				Role: "critic",
+				Line: "⚠ Critic gate skipped by user",
+			}
 		}
 
-		wp.logger.Log("", "Critic gate passed — starting workers")
 		wp.runPhase(minPhase, contract)
 	}()
 
@@ -199,6 +216,17 @@ func (wp *WorkerPool) GetWorkerStatuses() []FeatureWorker {
 		result = append(result, cp)
 	}
 	return result
+}
+
+func (wp *WorkerPool) GetTaintedStatuses() map[string]bool {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+
+	out := make(map[string]bool, len(wp.tainted))
+	for id, tainted := range wp.tainted {
+		out[id] = tainted
+	}
+	return out
 }
 
 func (wp *WorkerPool) freshKnowledge() string {
@@ -265,6 +293,10 @@ func (wp *WorkerPool) depsMetLocked(f Feature) bool {
 		if f.Fixes == depID && w.Status == WorkerFailed {
 			continue
 		}
+		// Per PDF p.16: blocked dep whose fix tree completed counts as satisfied for downstream.
+		if w.Status == WorkerFailed && wp.isEffectivelyDoneLocked(depID) {
+			continue
+		}
 		return false
 	}
 	return true
@@ -283,6 +315,10 @@ func (wp *WorkerPool) depsBlockedLocked(f Feature) (bool, []string) {
 			if f.Fixes == depID {
 				continue
 			}
+			// Per PDF p.16: if the fix tree resolved the parent's assertions, downstream is not blocked.
+			if wp.isEffectivelyDoneLocked(depID) {
+				continue
+			}
 			failedDeps = append(failedDeps, depID)
 		}
 	}
@@ -290,6 +326,48 @@ func (wp *WorkerPool) depsBlockedLocked(f Feature) (bool, []string) {
 		return true, failedDeps
 	}
 	return false, nil
+}
+
+// isEffectivelyDoneLocked reports whether the feature's assertions are satisfied
+// either directly or via its fix tree. Caller must hold wp.mu.
+func (wp *WorkerPool) isEffectivelyDoneLocked(featureID string) bool {
+	return wp.featureOutcomeLocked(featureID).EffectiveDone
+}
+
+func (wp *WorkerPool) featureOutcomeLocked(featureID string) FeatureOutcome {
+	outcomes := wp.computeFeatureOutcomesLocked()
+	if out, ok := outcomes[featureID]; ok {
+		return out
+	}
+	return FeatureOutcome{EffectiveDone: true, Resolution: ResolutionOpen}
+}
+
+func (wp *WorkerPool) computeFeatureOutcomesLocked() map[string]FeatureOutcome {
+	features := make([]Feature, 0, len(wp.workers))
+	for _, w := range wp.workers {
+		f := w.Feature
+		switch w.Status {
+		case WorkerRunning:
+			f.Status = "in_progress"
+		case WorkerAwaitingValidation:
+			f.Status = "awaiting_validation"
+		case WorkerValidating:
+			f.Status = "validating"
+		case WorkerRefining:
+			f.Status = "refining"
+		case WorkerDone:
+			f.Status = "done"
+		case WorkerFailed:
+			f.Status = "blocked"
+		default:
+			f.Status = "pending"
+		}
+		if wp.tainted[f.ID] {
+			f.Tainted = true
+		}
+		features = append(features, f)
+	}
+	return buildFeatureOutcomes(features, wp.tainted)
 }
 
 func (wp *WorkerPool) startReadyFeatures(candidates []Feature, siblingNames []string, contract string) int {
@@ -523,7 +601,7 @@ func (wp *WorkerPool) runValidator(feature Feature, contract string) {
 	specDir := filepath.Dir(wp.missionDir)
 	prompt := BuildValidatorPrompt(feature, wp.missionDir, specDir)
 	ch := make(chan ClaudeStreamMsg, 64)
-	cmd := StartClaude(prompt, wp.projectDir, wp.verbose, ch, "--max-turns", "25")
+	cmd := StartClaude(prompt, wp.projectDir, wp.verbose, ch, "--max-turns", "50")
 
 	wp.mu.Lock()
 	wp.workers[feature.ID].cmd = cmd
@@ -585,20 +663,9 @@ func (wp *WorkerPool) runValidator(feature Feature, contract string) {
 				if wp.retryValidator(feature, contract, fmt.Sprintf("error: %v", msg.Err)) {
 					return
 				}
-				wp.logger.Log(feature.ID, "Validator error: %v — treating as BLOCKED", msg.Err)
-				wp.mu.Lock()
-				wp.workers[feature.ID].Status = WorkerFailed
-				wp.workers[feature.ID].EndTime = time.Now()
-				wp.mu.Unlock()
-				wp.updateFeatureStatus(feature.ID, "blocked")
-				wp.eventCh <- WorkerEvent{
-					FeatureID: feature.ID,
-					Role:      "validator",
-					Done:      true,
-					Verdict:   "BLOCKED",
-					Line:      fmt.Sprintf("✕ %s validator error: %v", feature.ID, msg.Err),
-				}
-				wp.advanceIfPhaseComplete(feature.Phase, contract)
+				wp.logger.Log(feature.ID, "Validator error after retries: %v — sending to refinement with synthetic report", msg.Err)
+				report := syntheticValidatorReport(feature, "validator error", fmt.Sprintf("%v", msg.Err))
+				wp.goToRefinement(feature, contract, report, fmt.Sprintf("⚠ %s validator unavailable (%v) — refining anyway...", feature.ID, msg.Err))
 				return
 			}
 			resultText = msg.Result
@@ -610,6 +677,17 @@ func (wp *WorkerPool) runValidator(feature Feature, contract string) {
 		if tainted {
 			report.Notes = append(report.Notes, "TAINTED: validator accessed worker output — black-box rule violated, results may be biased")
 		}
+		reportTainted := reportHasTaintedNote(*report)
+		wp.mu.Lock()
+		if reportTainted {
+			wp.tainted[feature.ID] = true
+		} else {
+			delete(wp.tainted, feature.ID)
+		}
+		if w, ok := wp.workers[feature.ID]; ok {
+			w.Feature.Tainted = reportTainted
+		}
+		wp.mu.Unlock()
 		wp.persistReport(feature.ID, "validator", report)
 	}
 
@@ -617,20 +695,9 @@ func (wp *WorkerPool) runValidator(feature Feature, contract string) {
 		if wp.retryValidator(feature, contract, "unparseable output") {
 			return
 		}
-		wp.logger.Log(feature.ID, "Validator returned unparseable output — treating as BLOCKED")
-		wp.mu.Lock()
-		wp.workers[feature.ID].Status = WorkerFailed
-		wp.workers[feature.ID].EndTime = time.Now()
-		wp.mu.Unlock()
-		wp.updateFeatureStatus(feature.ID, "blocked")
-		wp.eventCh <- WorkerEvent{
-			FeatureID: feature.ID,
-			Role:      "validator",
-			Done:      true,
-			Verdict:   "BLOCKED",
-			Line:      fmt.Sprintf("✕ %s validator: unparseable output", feature.ID),
-		}
-		wp.advanceIfPhaseComplete(feature.Phase, contract)
+		wp.logger.Log(feature.ID, "Validator returned unparseable output after retries — sending to refinement with synthetic report")
+		synth := syntheticValidatorReport(feature, "unparseable output", "validator did not return a valid JSON report after retries")
+		wp.goToRefinement(feature, contract, synth, fmt.Sprintf("⚠ %s validator output unreadable — refining anyway...", feature.ID))
 		return
 	}
 
@@ -652,35 +719,60 @@ func (wp *WorkerPool) runValidator(feature Feature, contract string) {
 		wp.advanceIfPhaseComplete(feature.Phase, contract)
 
 	case "FAIL":
-		wp.logger.Log(feature.ID, "Validator FAILED — starting refinement")
-		wp.mu.Lock()
-		wp.workers[feature.ID].Status = WorkerRefining
-		wp.mu.Unlock()
-		wp.updateFeatureStatus(feature.ID, "refining")
-		wp.eventCh <- WorkerEvent{
-			FeatureID: feature.ID,
-			Role:      "validator",
-			Done:      true,
-			Verdict:   "FAIL",
-			Line:      fmt.Sprintf("✕ %s validation FAILED — refining...", feature.ID),
-		}
-		go wp.runRefinement(feature, *report, contract)
+		wp.goToRefinement(feature, contract, *report, fmt.Sprintf("✕ %s validation FAILED — refining...", feature.ID))
 
 	default:
-		wp.logger.Log(feature.ID, "Validator BLOCKED")
-		wp.mu.Lock()
-		wp.workers[feature.ID].Status = WorkerFailed
-		wp.workers[feature.ID].EndTime = time.Now()
-		wp.mu.Unlock()
-		wp.updateFeatureStatus(feature.ID, "blocked")
-		wp.eventCh <- WorkerEvent{
-			FeatureID: feature.ID,
-			Role:      "validator",
-			Done:      true,
-			Verdict:   "BLOCKED",
-			Line:      fmt.Sprintf("✕ %s validator BLOCKED", feature.ID),
+		wp.goToRefinement(feature, contract, *report, fmt.Sprintf("✕ %s validation BLOCKED — refining...", feature.ID))
+	}
+}
+
+func (wp *WorkerPool) goToRefinement(feature Feature, contract string, report ValidatorReport, displayLine string) {
+	wp.persistReport(feature.ID, "validator", &report)
+
+	wp.logger.Log(feature.ID, "Sending to refinement (verdict=%s)", report.Verdict)
+
+	wp.mu.Lock()
+	wp.workers[feature.ID].Status = WorkerRefining
+	wp.mu.Unlock()
+
+	wp.updateFeatureStatus(feature.ID, "refining")
+
+	wp.eventCh <- WorkerEvent{
+		FeatureID: feature.ID,
+		Role:      "validator",
+		Done:      true,
+		Verdict:   report.Verdict,
+		Line:      displayLine,
+	}
+
+	go wp.runRefinement(feature, report, contract)
+}
+
+func syntheticValidatorReport(feature Feature, reason, detail string) ValidatorReport {
+	now := time.Now().UTC().Format(time.RFC3339)
+	var assertions []ValidatorAssertion
+	for _, ref := range feature.ValidationRefs {
+		id := strings.TrimSpace(ref)
+		if colon := strings.Index(ref, ":"); colon > 0 {
+			id = strings.TrimSpace(ref[:colon])
 		}
-		wp.advanceIfPhaseComplete(feature.Phase, contract)
+		assertions = append(assertions, ValidatorAssertion{
+			ID:       id,
+			Result:   "BLOCKED",
+			Evidence: fmt.Sprintf("Validator could not produce a verdict: %s", reason),
+		})
+	}
+	return ValidatorReport{
+		FeatureID:  feature.ID,
+		Role:       "validator",
+		StartedAt:  now,
+		EndedAt:    now,
+		Verdict:    "BLOCKED",
+		Assertions: assertions,
+		Notes: []string{
+			fmt.Sprintf("VALIDATOR_FAILURE: %s", detail),
+			"This report is synthetic — the validator could not produce a verdict. Diagnose whether the implementation is incomplete or whether the validator needs different evidence (e.g. a smoke-test script, more logging, an HTTP probe) and propose minimum-scope fix features accordingly.",
+		},
 	}
 }
 
@@ -803,9 +895,58 @@ func (wp *WorkerPool) runRefinement(feature Feature, report ValidatorReport, con
 
 	if err := AddFixFeatures(wp.missionDir, fixes, feature.ID, &wp.fileMu); err != nil {
 		wp.logger.Log(feature.ID, "Failed to write fix features: %v", err)
+		wp.mu.Lock()
+		wp.workers[feature.ID].Status = WorkerFailed
+		wp.workers[feature.ID].EndTime = time.Now()
+		wp.mu.Unlock()
+		wp.updateFeatureStatus(feature.ID, "blocked")
+		wp.eventCh <- WorkerEvent{
+			FeatureID: feature.ID,
+			Role:      "refinement",
+			Done:      true,
+			Line:      fmt.Sprintf("✕ %s refinement failed to persist fixes", feature.ID),
+		}
+		wp.advanceIfPhaseComplete(feature.Phase, contract)
+		return
+	}
+
+	rootID := wp.resolveRootFeatureID(feature.ID)
+	if rootID == "" {
+		rootID = feature.ID
 	}
 
 	wp.mu.Lock()
+	usedAttempts := wp.fixAttemptsByRoot[rootID]
+	projectedAttempts := usedAttempts + len(fixes)
+	limit := wp.maxFixAttempts
+	if projectedAttempts > limit {
+		wp.workers[feature.ID].Status = WorkerFailed
+		wp.workers[feature.ID].EndTime = time.Now()
+		for _, fix := range fixes {
+			wp.workers[fix.ID] = &FeatureWorker{
+				Feature: fix,
+				Status:  WorkerFailed,
+			}
+		}
+		wp.mu.Unlock()
+
+		wp.updateFeatureStatus(feature.ID, "blocked")
+		for _, fix := range fixes {
+			wp.updateFeatureStatus(fix.ID, "blocked")
+		}
+
+		wp.logger.Log(feature.ID, "Fix autopilot limit reached for %s: %d/%d (new fixes=%d)", rootID, usedAttempts, limit, len(fixes))
+		wp.eventCh <- WorkerEvent{
+			FeatureID: feature.ID,
+			Role:      "refinement",
+			Done:      true,
+			Line:      fmt.Sprintf("✕ %s fix autopilot limit reached for %s (%d/%d) — awaiting manual action", feature.ID, rootID, usedAttempts, limit),
+		}
+		wp.advanceIfPhaseComplete(feature.Phase, contract)
+		return
+	}
+	wp.fixAttemptsByRoot[rootID] = projectedAttempts
+
 	wp.workers[feature.ID].Status = WorkerFailed
 	wp.workers[feature.ID].EndTime = time.Now()
 	for _, fix := range fixes {
@@ -823,7 +964,11 @@ func (wp *WorkerPool) runRefinement(feature Feature, report ValidatorReport, con
 	for i, f := range fixes {
 		fixIDs[i] = f.ID
 	}
-	wp.logger.Log(feature.ID, "Generated %d fix features: %s", len(fixes), strings.Join(fixIDs, ", "))
+	wp.logger.Log(
+		feature.ID,
+		"Generated %d fix features: %s (autopilot budget %s %d/%d)",
+		len(fixes), strings.Join(fixIDs, ", "), rootID, projectedAttempts, wp.maxFixAttempts,
+	)
 	wp.eventCh <- WorkerEvent{
 		FeatureID: feature.ID,
 		Role:      "refinement",
@@ -864,8 +1009,20 @@ func (wp *WorkerPool) runFixCriticAndStart(fixes []Feature, contract string) {
 		return
 	}
 
-	wp.logger.Log("", "Fix critic gate passed — starting fix workers")
-	wp.runPhase(fixes[0].Phase, contract)
+	wp.logger.Log("", "Fix critic gate passed — starting generated fix workers")
+	siblingNames := make([]string, 0, len(fixes))
+	for _, fix := range fixes {
+		siblingNames = append(siblingNames, fmt.Sprintf("%s: %s", fix.ID, fix.Title))
+	}
+	started := wp.startReadyFeatures(fixes, siblingNames, contract)
+	if started == 0 {
+		wp.logger.Log("", "No generated fix features were ready after critic pass")
+		wp.eventCh <- WorkerEvent{
+			Role: "refinement",
+			Line: "⚠ No generated fix features are ready — awaiting dependency resolution",
+		}
+		wp.advanceIfPhaseComplete(fixes[0].Phase, contract)
+	}
 }
 
 func (wp *WorkerPool) retryValidator(feature Feature, contract string, reason string) bool {
@@ -946,7 +1103,7 @@ func (wp *WorkerPool) retryFailedInPhase(phase int, contract string) bool {
 	var toRetry []Feature
 	for _, id := range ids {
 		w := wp.workers[id]
-		if w.Status == WorkerFailed {
+		if w.Status == WorkerFailed && !wp.isEffectivelyDoneLocked(id) {
 			w.FailureContext = wp.buildFailureContext(w)
 			w.Status = WorkerPending
 			w.StartTime = time.Time{}
@@ -1016,16 +1173,20 @@ func (wp *WorkerPool) advanceIfPhaseComplete(phase int, contract string) {
 	hasFailed := false
 	wp.mu.Lock()
 	for _, id := range wp.phases[phase] {
-		if wp.workers[id].Status == WorkerFailed {
+		if wp.workers[id].Status == WorkerFailed && !wp.isEffectivelyDoneLocked(id) {
 			hasFailed = true
 			break
 		}
 	}
 	wp.mu.Unlock()
 
+	// Root-phase retries are manual-only. We intentionally avoid automatic
+	// phase retries to keep unresolved failures explicit and user-controlled.
 	if hasFailed {
-		if wp.retryFailedInPhase(phase, contract) {
-			return
+		wp.logger.Log("", "Phase %d ended with unresolved failures — manual recovery required", phase)
+		wp.eventCh <- WorkerEvent{
+			Phase: phase,
+			Line:  fmt.Sprintf("⚠ Phase %d ended with unresolved failures — manual recovery required", phase),
 		}
 	}
 
@@ -1070,22 +1231,34 @@ func (wp *WorkerPool) checkAllDone() {
 	}
 	wp.mu.Unlock()
 
-	var done, failed int
+	var done, viaFix, failed, tainted int
 	wp.mu.Lock()
+	outcomes := wp.computeFeatureOutcomesLocked()
 	for _, w := range wp.workers {
 		switch w.Status {
 		case WorkerDone:
 			done++
+			if outcomes[w.Feature.ID].Resolution == ResolutionResolvedTainted {
+				tainted++
+			}
 		case WorkerFailed:
-			failed++
+			out := outcomes[w.Feature.ID]
+			if out.EffectiveDone {
+				viaFix++
+				if out.Resolution == ResolutionResolvedTainted {
+					tainted++
+				}
+			} else {
+				failed++
+			}
 		}
 	}
 	wp.mu.Unlock()
 
-	wp.logger.Log("", "All phases complete — %d done, %d failed", done, failed)
+	wp.logger.Log("", "All phases complete — %d done, %d via fix, %d failed, %d tainted", done, viaFix, failed, tainted)
 	wp.eventCh <- WorkerEvent{
 		AllDone: true,
-		Line:    fmt.Sprintf("✓ Execution complete — %d done, %d failed", done, failed),
+		Line:    fmt.Sprintf("✓ Execution complete — %d done, %d via fix, %d failed, %d tainted", done, viaFix, failed, tainted),
 	}
 }
 
@@ -1129,6 +1302,40 @@ func (wp *WorkerPool) updateFeatureStatus(featureID string, status string) {
 	update(manifest.Features)
 	update(manifest.FixFeatures)
 
+	all := make([]Feature, 0, len(manifest.Features)+len(manifest.FixFeatures))
+	all = append(all, manifest.Features...)
+	all = append(all, manifest.FixFeatures...)
+	tainted := loadTaintedFeatureIDs(wp.missionDir, all)
+	for id, isTainted := range wp.tainted {
+		if isTainted {
+			tainted[id] = true
+		}
+	}
+	outcomes := buildFeatureOutcomes(all, tainted)
+	now := time.Now().UTC().Format(time.RFC3339)
+	applyOutcome := func(features []Feature) {
+		for i := range features {
+			out, ok := outcomes[features[i].ID]
+			if !ok {
+				continue
+			}
+			features[i].Resolution = out.Resolution
+			features[i].Tainted = out.Tainted
+			if out.ResolvedBy != "" {
+				features[i].ResolvedBy = out.ResolvedBy
+			}
+			if (out.Resolution == ResolutionResolvedViaFix || out.Resolution == ResolutionResolvedTainted) && features[i].ResolvedAt == "" {
+				features[i].ResolvedAt = now
+			}
+			if out.Resolution == ResolutionOpen || out.Resolution == ResolutionUnresolved {
+				features[i].ResolvedAt = ""
+				features[i].ResolvedBy = ""
+			}
+		}
+	}
+	applyOutcome(manifest.Features)
+	applyOutcome(manifest.FixFeatures)
+
 	out, _ := json.MarshalIndent(manifest, "", "  ")
 	if err := os.WriteFile(path, out, 0o644); err != nil {
 		wp.logger.Log(featureID, "WARN: cannot write features.json: %v", err)
@@ -1165,4 +1372,96 @@ func listenWorker(ch chan WorkerEvent) tea.Cmd {
 		}
 		return ev
 	}
+}
+
+func loadFixAttemptBudgets(missionDir string, fallback []Feature) map[string]int {
+	all := fallback
+	if manifestFeatures, err := readAllFeaturesFromManifest(missionDir); err == nil && len(manifestFeatures) > 0 {
+		all = manifestFeatures
+	}
+
+	byID := make(map[string]Feature, len(all))
+	for _, f := range all {
+		if f.ID == "" {
+			continue
+		}
+		if _, exists := byID[f.ID]; !exists {
+			byID[f.ID] = f
+		}
+	}
+
+	out := make(map[string]int)
+	for _, f := range all {
+		if f.ID == "" || f.Fixes == "" {
+			continue
+		}
+		rootID := resolveRootFeatureIDInMap(byID, f.ID)
+		out[rootID]++
+	}
+	return out
+}
+
+func readAllFeaturesFromManifest(missionDir string) ([]Feature, error) {
+	path := filepath.Join(missionDir, "features.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var manifest FeaturesManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, err
+	}
+	all := make([]Feature, 0, len(manifest.Features)+len(manifest.FixFeatures))
+	all = append(all, manifest.Features...)
+	all = append(all, manifest.FixFeatures...)
+	return all, nil
+}
+
+func resolveRootFeatureIDInMap(byID map[string]Feature, featureID string) string {
+	if featureID == "" {
+		return ""
+	}
+	current := featureID
+	seen := make(map[string]struct{})
+	for {
+		if _, loop := seen[current]; loop {
+			return current
+		}
+		seen[current] = struct{}{}
+		f, ok := byID[current]
+		if !ok || f.Fixes == "" {
+			return current
+		}
+		current = f.Fixes
+	}
+}
+
+func (wp *WorkerPool) resolveRootFeatureID(featureID string) string {
+	if featureID == "" {
+		return ""
+	}
+
+	wp.mu.Lock()
+	byID := make(map[string]Feature, len(wp.workers))
+	for id, w := range wp.workers {
+		byID[id] = w.Feature
+	}
+	rootID := resolveRootFeatureIDInMap(byID, featureID)
+	wp.mu.Unlock()
+
+	if rootID != featureID {
+		return rootID
+	}
+
+	manifestFeatures, err := readAllFeaturesFromManifest(wp.missionDir)
+	if err != nil {
+		return rootID
+	}
+	byID = make(map[string]Feature, len(manifestFeatures))
+	for _, f := range manifestFeatures {
+		if _, exists := byID[f.ID]; !exists {
+			byID[f.ID] = f
+		}
+	}
+	return resolveRootFeatureIDInMap(byID, featureID)
 }

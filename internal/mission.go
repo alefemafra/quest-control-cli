@@ -98,16 +98,43 @@ func ReadMissionState(missionDir string) MissionState {
 		return MissionState{Path: missionDir}
 	}
 
-	all := append(manifest.Features, manifest.FixFeatures...)
+	all := make([]Feature, 0, len(manifest.Features)+len(manifest.FixFeatures))
+	all = append(all, manifest.Features...)
+	all = append(all, manifest.FixFeatures...)
+
+	tainted := loadTaintedFeatureIDs(missionDir, all)
+	outcomes := buildFeatureOutcomes(all, tainted)
+	for i := range all {
+		if out, ok := outcomes[all[i].ID]; ok {
+			all[i].Resolution = out.Resolution
+			if out.ResolvedBy != "" {
+				all[i].ResolvedBy = out.ResolvedBy
+			}
+			all[i].Tainted = out.Tainted
+		}
+	}
+
 	stats := MissionStats{Total: len(all)}
 	for _, f := range all {
 		switch f.Status {
 		case "done", "validated":
-			stats.Done++
+			stats.DoneDirect++
 		case "in_progress":
 			stats.InProgress++
 		case "blocked":
 			stats.Blocked++
+			out := outcomes[f.ID]
+			switch out.Resolution {
+			case ResolutionResolvedViaFix:
+				stats.DoneViaFix++
+				stats.BlockedResolved++
+			case ResolutionResolvedTainted:
+				stats.DoneViaFix++
+				stats.BlockedResolved++
+				stats.BlockedTainted++
+			default:
+				stats.BlockedUnresolved++
+			}
 		case "pending", "":
 			stats.Pending++
 		case "awaiting_validation":
@@ -118,6 +145,7 @@ func ReadMissionState(missionDir string) MissionState {
 			stats.Refining++
 		}
 	}
+	stats.Done = stats.DoneDirect + stats.DoneViaFix
 
 	return MissionState{
 		Exists:   true,
@@ -151,20 +179,17 @@ func WriteMissionFiles(specDir, projectDir string, plan PlanData) error {
 		specRelPath = plan.Spec
 	}
 
-	manifest := FeaturesManifest{
-		Spec:            specRelPath,
-		StatusLifecycle: []string{"pending", "in_progress", "awaiting_validation", "validating", "refining", "done", "blocked"},
-		Project:         plan.Project,
-		Owner:           plan.Owner,
-		Features:        plan.Features,
-		FixFeatures:     nil,
+	featuresPath := filepath.Join(missionDir, "features.json")
+	manifest, err := buildManifestForWrite(featuresPath, plan, specRelPath)
+	if err != nil {
+		return err
 	}
 
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(missionDir, "features.json"), data, 0o644); err != nil {
+	if err := os.WriteFile(featuresPath, data, 0o644); err != nil {
 		return err
 	}
 
@@ -207,6 +232,128 @@ func WriteMissionFiles(specDir, projectDir string, plan PlanData) error {
 	}
 
 	return nil
+}
+
+func buildManifestForWrite(featuresPath string, plan PlanData, specRelPath string) (FeaturesManifest, error) {
+	defaultLifecycle := []string{"pending", "in_progress", "awaiting_validation", "validating", "refining", "done", "blocked"}
+
+	existingData, err := os.ReadFile(featuresPath)
+	if err != nil {
+		// New mission write.
+		return FeaturesManifest{
+			Spec:            specRelPath,
+			StatusLifecycle: defaultLifecycle,
+			Project:         plan.Project,
+			Owner:           plan.Owner,
+			Features:        plan.Features,
+			FixFeatures:     nil,
+		}, nil
+	}
+
+	// Merge write for regenerate/edit paths.
+	var existing FeaturesManifest
+	if err := json.Unmarshal(existingData, &existing); err != nil {
+		return FeaturesManifest{}, err
+	}
+
+	mergedFeatures := mergeRootFeatures(existing.Features, plan.Features)
+	rootIDs := make(map[string]struct{}, len(mergedFeatures))
+	for _, f := range mergedFeatures {
+		rootIDs[f.ID] = struct{}{}
+	}
+
+	normalizedFixes, err := normalizeFixFeatures(existing.FixFeatures, rootIDs)
+	if err != nil {
+		return FeaturesManifest{}, err
+	}
+
+	if err := validateUniqueFeatureIDs(mergedFeatures, normalizedFixes); err != nil {
+		return FeaturesManifest{}, err
+	}
+
+	project := plan.Project
+	if project == "" {
+		project = existing.Project
+	}
+	owner := plan.Owner
+	if owner == "" {
+		owner = existing.Owner
+	}
+	lifecycle := existing.StatusLifecycle
+	if len(lifecycle) == 0 {
+		lifecycle = defaultLifecycle
+	}
+
+	return FeaturesManifest{
+		Spec:            specRelPath,
+		StatusLifecycle: lifecycle,
+		Project:         project,
+		Owner:           owner,
+		Features:        mergedFeatures,
+		FixFeatures:     normalizedFixes,
+	}, nil
+}
+
+func mergeRootFeatures(existing []Feature, planned []Feature) []Feature {
+	if len(existing) == 0 {
+		return planned
+	}
+	if len(planned) == 0 {
+		return existing
+	}
+
+	byExistingID := make(map[string]Feature, len(existing))
+	for _, f := range existing {
+		byExistingID[f.ID] = f
+	}
+
+	seen := make(map[string]struct{}, len(planned))
+	merged := make([]Feature, 0, len(planned)+len(existing))
+	for _, next := range planned {
+		if old, ok := byExistingID[next.ID]; ok {
+			merged = append(merged, mergeFeatureExecutionMetadata(old, next))
+		} else {
+			merged = append(merged, next)
+		}
+		seen[next.ID] = struct{}{}
+	}
+
+	// Preserve historical/runtime entries if omitted by a planner regeneration.
+	for _, old := range existing {
+		if _, alreadyPresent := seen[old.ID]; alreadyPresent {
+			continue
+		}
+		if old.Status != "" && old.Status != "pending" {
+			merged = append(merged, old)
+		}
+	}
+
+	return merged
+}
+
+func mergeFeatureExecutionMetadata(existing Feature, planned Feature) Feature {
+	merged := planned
+
+	// Preserve runtime status when planner emits empty/pending placeholders.
+	if existing.Status != "" && (planned.Status == "" || planned.Status == "pending") {
+		merged.Status = existing.Status
+	}
+
+	// Preserve v2 resolution metadata unless planner explicitly sets it.
+	if merged.Resolution == "" {
+		merged.Resolution = existing.Resolution
+	}
+	if merged.ResolvedBy == "" {
+		merged.ResolvedBy = existing.ResolvedBy
+	}
+	if merged.ResolvedAt == "" {
+		merged.ResolvedAt = existing.ResolvedAt
+	}
+	if !merged.Tainted {
+		merged.Tainted = existing.Tainted
+	}
+
+	return merged
 }
 
 func ParsePlanFromText(text string) *PlanData {
@@ -405,6 +552,173 @@ func ParseAssertionsJSON(text string) []Assertion {
 	}
 
 	return nil
+}
+
+// Deprecated: use ParseAssertionsOnlyJSON + ParseFeaturesAndKnowledgeJSON.
+// Kept for standalone testing and legacy single-call flow.
+func ParseSkillJSON(text string) ([]Feature, []Assertion, []string, bool) {
+	plan := ParsePlanFromText(text)
+	if plan != nil && len(plan.Features) > 0 && len(plan.Assertions) > 0 {
+		return plan.Features, plan.Assertions, plan.Knowledge, true
+	}
+	features := ParseFeaturesJSON(text)
+	assertions := ParseAssertionsJSON(text)
+	if len(features) > 0 && len(assertions) > 0 {
+		knowledge := ParseKnowledgeJSON(text)
+		return features, assertions, knowledge, true
+	}
+	return nil, nil, nil, false
+}
+
+// ParseAssertionsOnlyJSON is the v2 Call 1 parser: expects a JSON array of
+// assertion groups. Returns ok=true when at least one group with at least one
+// item is parsed.
+func ParseAssertionsOnlyJSON(text string) ([]Assertion, bool) {
+	assertions := ParseAssertionsJSON(text)
+	for _, a := range assertions {
+		if len(a.Items) > 0 {
+			return assertions, true
+		}
+	}
+	return nil, false
+}
+
+// ParseFeaturesOnlyJSON is the v3 Phase Features parser: expects either
+//
+//	{"features": [...]}
+//
+// or a bare features array. Knowledge is NOT extracted here (separate phase).
+// Returns ok=true when at least one feature parses.
+func ParseFeaturesOnlyJSON(text string) ([]Feature, bool) {
+	text = strings.TrimSpace(text)
+
+	// Try bare array first (most permissive — model may drop the wrapper).
+	var arr []Feature
+	if err := json.Unmarshal([]byte(text), &arr); err == nil && len(arr) > 0 {
+		return arr, true
+	}
+
+	// Try wrapped object.
+	var wrapper struct {
+		Features []Feature `json:"features"`
+	}
+	if err := json.Unmarshal([]byte(text), &wrapper); err == nil && len(wrapper.Features) > 0 {
+		return wrapper.Features, true
+	}
+
+	// Try fenced JSON.
+	re := regexp.MustCompile("(?s)```(?:json)?\\s*\\n(.*?)\\n```")
+	if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+		body := strings.TrimSpace(matches[1])
+		if err := json.Unmarshal([]byte(body), &wrapper); err == nil && len(wrapper.Features) > 0 {
+			return wrapper.Features, true
+		}
+		if err := json.Unmarshal([]byte(body), &arr); err == nil && len(arr) > 0 {
+			return arr, true
+		}
+	}
+
+	// Try balanced { ... } object containing "features".
+	if start := strings.Index(text, "{"); start >= 0 {
+		depth := 0
+		for i := start; i < len(text); i++ {
+			switch text[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					if err := json.Unmarshal([]byte(text[start:i+1]), &wrapper); err == nil && len(wrapper.Features) > 0 {
+						return wrapper.Features, true
+					}
+					i = len(text)
+				}
+			}
+		}
+	}
+
+	// Final fallback: existing parser (handles edge cases of bare object regex).
+	features := ParseFeaturesJSON(text)
+	if len(features) > 0 {
+		return features, true
+	}
+	return nil, false
+}
+
+// Deprecated: use ParseFeaturesOnlyJSON + a separate Knowledge parse.
+// ParseFeaturesAndKnowledgeJSON was the v2 combined parser.
+func ParseFeaturesAndKnowledgeJSON(text string) ([]Feature, []string, bool) {
+	text = strings.TrimSpace(text)
+
+	var wrapper struct {
+		Features  []Feature `json:"features"`
+		Knowledge []string  `json:"knowledge"`
+	}
+	if err := json.Unmarshal([]byte(text), &wrapper); err == nil && len(wrapper.Features) > 0 {
+		return wrapper.Features, wrapper.Knowledge, true
+	}
+
+	// Try code fences
+	re := regexp.MustCompile("(?s)```(?:json)?\\s*\\n(.*?)\\n```")
+	if matches := re.FindStringSubmatch(text); len(matches) > 1 {
+		if err := json.Unmarshal([]byte(matches[1]), &wrapper); err == nil && len(wrapper.Features) > 0 {
+			return wrapper.Features, wrapper.Knowledge, true
+		}
+	}
+
+	// Try locating a balanced { ... } object with "features"
+	if start := strings.Index(text, "{"); start >= 0 {
+		depth := 0
+		for i := start; i < len(text); i++ {
+			switch text[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					if err := json.Unmarshal([]byte(text[start:i+1]), &wrapper); err == nil && len(wrapper.Features) > 0 {
+						return wrapper.Features, wrapper.Knowledge, true
+					}
+					i = len(text) // break outer loop
+				}
+			}
+		}
+	}
+
+	// Final fallback: parse features and knowledge separately
+	features := ParseFeaturesJSON(text)
+	knowledge := ParseKnowledgeJSON(text)
+	if len(features) > 0 {
+		return features, knowledge, true
+	}
+	return nil, nil, false
+}
+
+// CompactAssertionIDs returns a per-category map of assertion IDs (e.g. "ui.1",
+// "ui.2", ...) extracted from parsed assertion groups. Used to feed Call 2
+// without re-injecting the assertion text.
+func CompactAssertionIDs(assertions []Assertion) map[string][]string {
+	if len(assertions) == 0 {
+		return nil
+	}
+	idRe := regexp.MustCompile(`^\s*([a-zA-Z][a-zA-Z0-9_]*\.\d+)`)
+	result := make(map[string][]string, len(assertions))
+	for _, a := range assertions {
+		category := strings.TrimSpace(a.Category)
+		if category == "" {
+			continue
+		}
+		var ids []string
+		for _, item := range a.Items {
+			if m := idRe.FindStringSubmatch(item); len(m) >= 2 {
+				ids = append(ids, m[1])
+			}
+		}
+		if len(ids) > 0 {
+			result[category] = ids
+		}
+	}
+	return result
 }
 
 func ParseFeaturesJSON(text string) []Feature {

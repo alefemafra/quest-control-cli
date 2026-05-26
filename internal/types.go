@@ -28,9 +28,10 @@ const (
 	ReviewTabPlan
 	ReviewTabSpec
 	ReviewTabContract
+	ReviewTabCritic
 )
 
-var ReviewTabOrder = []ReviewTab{ReviewTabChat, ReviewTabPlan, ReviewTabSpec, ReviewTabContract}
+var ReviewTabOrder = []ReviewTab{ReviewTabChat, ReviewTabPlan, ReviewTabSpec, ReviewTabContract, ReviewTabCritic}
 
 type ChatMessage struct {
 	Role string // "user", "assistant", "system"
@@ -54,6 +55,10 @@ type Feature struct {
 	ValidationRefs []string `json:"validation_refs"`
 	Fixes          string   `json:"fixes,omitempty"`
 	Addresses      []string `json:"addresses,omitempty"`
+	Resolution     string   `json:"resolution,omitempty"`
+	ResolvedBy     string   `json:"resolved_by,omitempty"`
+	ResolvedAt     string   `json:"resolved_at,omitempty"`
+	Tainted        bool     `json:"tainted,omitempty"`
 }
 
 type Assertion struct {
@@ -72,10 +77,10 @@ type PlanData struct {
 }
 
 type FeaturesManifest struct {
-	Spec            string   `json:"spec,omitempty"`
-	StatusLifecycle []string `json:"status_lifecycle,omitempty"`
-	Project         string   `json:"project"`
-	Owner           string   `json:"owner"`
+	Spec            string    `json:"spec,omitempty"`
+	StatusLifecycle []string  `json:"status_lifecycle,omitempty"`
+	Project         string    `json:"project"`
+	Owner           string    `json:"owner"`
 	Features        []Feature `json:"features"`
 	FixFeatures     []Feature `json:"fix_features"`
 }
@@ -83,8 +88,13 @@ type FeaturesManifest struct {
 type MissionStats struct {
 	Total              int
 	Done               int
+	DoneDirect         int
+	DoneViaFix         int
 	InProgress         int
 	Blocked            int
+	BlockedUnresolved  int
+	BlockedResolved    int
+	BlockedTainted     int
 	Pending            int
 	AwaitingValidation int
 	Validating         int
@@ -109,15 +119,22 @@ type ClaudeStreamMsg struct {
 }
 
 type WorkerEvent struct {
-	FeatureID string
-	Line      string
-	Done      bool
-	Result    string
-	Err       error
-	AllDone   bool
-	Phase     int
-	Role      string // "", "critic", "validator", "refinement"
-	Verdict   string // "PASS", "FAIL", "BLOCKED" (validator only)
+	FeatureID    string
+	Line         string
+	Done         bool
+	Result       string
+	Err          error
+	AllDone      bool
+	Phase        int
+	Role         string // "", "critic", "validator", "refinement"
+	Verdict      string // "PASS", "FAIL", "BLOCKED" (validator only)
+	CriticReport *CriticReport
+}
+
+type autoFixEventMsg struct {
+	line string
+	done bool
+	err  error
 }
 
 type ValidatorAssertion struct {
@@ -167,10 +184,32 @@ type GenPhase int
 const (
 	GenPhaseNone       GenPhase = iota
 	GenPhaseAnalysis            // Phase 1: Sonnet codebase analysis
-	GenPhaseAssertions          // Phase 2: Opus assertion derivation
-	GenPhaseFeatures            // Phase 3: Opus feature decomposition
-	GenPhaseKnowledge           // Phase 4: Opus knowledge extraction
+	GenPhaseAssertions          // Phase 2: Opus assertions (spec-to-assertions skill)
+	GenPhaseFeatures            // Phase 3: Opus feature decomposition only (spec-to-features skill)
+	GenPhaseKnowledge           // Phase 4: Sonnet knowledge synthesis (spec-to-knowledge skill)
+	GenPhaseCritic              // Phase 5: Critic validation
+	GenPhaseFixLoop             // Phase 6: Auto-fix loop
 )
 
 type retryDelayMsg struct{}
 
+type criticStreamMsg struct {
+	line string
+}
+
+type criticLoopMsg struct {
+	report   *CriticReport
+	passed   bool
+	advisory []CriticFinding
+	blocking []CriticFinding
+	err      error
+	attempt  int
+}
+
+type criticFixDoneMsg struct {
+	err error
+}
+
+type advisoryFixDoneMsg struct {
+	err error
+}

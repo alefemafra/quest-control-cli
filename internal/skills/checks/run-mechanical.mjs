@@ -292,16 +292,23 @@ function checkDecomposition(project, assertions) {
   }
 
   const features = Array.isArray(data.features) ? data.features : [];
+  const fixFeatures = Array.isArray(data.fix_features) ? data.fix_features : [];
+  const allFeatures = features.concat(fixFeatures);
   const lifecycle = Array.isArray(data.status_lifecycle) ? data.status_lifecycle : [];
   const required = ['id', 'title', 'phase', 'status', 'depends_on', 'scope', 'validation_refs'];
 
   const missingFields = [];
-  features.forEach(f => {
+  allFeatures.forEach(f => {
     const missing = required.filter(k => !(k in f));
     if (missing.length) missingFields.push({ id: f.id || '(no id)', missing });
   });
   if (missingFields.length === 0) {
-    record('M-D1', 'decomposition', 'pass', `all ${features.length} feature(s) have required fields`);
+    record(
+      'M-D1',
+      'decomposition',
+      'pass',
+      `all ${allFeatures.length} feature(s) across features+fix_features have required fields`
+    );
   } else {
     record(
       'M-D1',
@@ -314,22 +321,55 @@ function checkDecomposition(project, assertions) {
     );
   }
 
-  const idRe = /^F\d+[a-z]?$/;
-  const badIds = features.filter(f => !idRe.test(f.id || ''));
-  if (badIds.length === 0) {
-    record('M-D2', 'decomposition', 'pass', `all feature IDs match ^F\\d+[a-z]?$`);
+  const rootIdRe = /^F\d+[a-z]?$/;
+  const fixIdRe = /^F\d+[a-z]?(?:-fix-\d+)+$/;
+  const badRootIDs = features.filter(f => !rootIdRe.test(f.id || ''));
+  const badFixIDs = fixFeatures.filter(f => !fixIdRe.test(f.id || ''));
+  if (badRootIDs.length === 0 && badFixIDs.length === 0) {
+    record(
+      'M-D2',
+      'decomposition',
+      'pass',
+      'all IDs match expected patterns (features: ^F\\d+[a-z]?$; fix_features: ^F\\d+[a-z]?(?:-fix-\\d+)+$)'
+    );
   } else {
+    const issues = [];
+    if (badRootIDs.length > 0) {
+      issues.push(`root IDs: ${badRootIDs.map(f => f.id || '(empty)').join(', ')}`);
+    }
+    if (badFixIDs.length > 0) {
+      issues.push(`fix IDs: ${badFixIDs.map(f => f.id || '(empty)').join(', ')}`);
+    }
     record(
       'M-D2',
       'decomposition',
       'fail',
-      `${badIds.length} feature ID(s) violate pattern: ${badIds.map(f => f.id || '(empty)').join(', ')}`
+      `ID pattern violation(s): ${issues.join('; ')}`
     );
   }
 
-  const ids = new Set(features.map(f => f.id));
+  const duplicateIds = [];
+  const seenIds = new Map();
+  allFeatures.forEach(f => {
+    const id = f.id || '(empty)';
+    if (!seenIds.has(id)) {
+      seenIds.set(id, 1);
+      return;
+    }
+    seenIds.set(id, seenIds.get(id) + 1);
+  });
+  for (const [id, count] of seenIds.entries()) {
+    if (count > 1) duplicateIds.push(`${id} (x${count})`);
+  }
+  if (duplicateIds.length === 0) {
+    record('M-D7', 'decomposition', 'pass', 'feature IDs are globally unique across features+fix_features');
+  } else {
+    record('M-D7', 'decomposition', 'fail', `duplicate IDs across features+fix_features: ${duplicateIds.join(', ')}`);
+  }
+
+  const ids = new Set(allFeatures.map(f => f.id));
   const dangling = [];
-  features.forEach(f => {
+  allFeatures.forEach(f => {
     (f.depends_on || []).forEach(d => {
       if (!ids.has(d)) dangling.push({ feature: f.id, missing: d });
     });
@@ -345,7 +385,7 @@ function checkDecomposition(project, assertions) {
     );
   }
 
-  const graph = new Map(features.map(f => [f.id, f.depends_on || []]));
+  const graph = new Map(allFeatures.map(f => [f.id, f.depends_on || []]));
   const cycles = findCycles(graph);
   if (cycles.length === 0) {
     record('M-D4', 'decomposition', 'pass', 'dependency graph is acyclic');
@@ -360,7 +400,7 @@ function checkDecomposition(project, assertions) {
 
   const assertionIds = new Set(assertions.map(a => a.id));
   const danglingRefs = [];
-  features.forEach(f => {
+  allFeatures.forEach(f => {
     (f.validation_refs || []).forEach(r => {
       if (!assertionIds.has(r)) danglingRefs.push({ feature: f.id, ref: r });
     });
@@ -385,13 +425,13 @@ function checkDecomposition(project, assertions) {
   if (lifecycle.length === 0) {
     record('M-D6', 'decomposition', 'fail', 'status_lifecycle is empty or missing');
   } else {
-    const bad = features.filter(f => !lifecycle.includes(f.status));
+    const bad = allFeatures.filter(f => !lifecycle.includes(f.status));
     if (bad.length === 0) {
       record(
         'M-D6',
         'decomposition',
         'pass',
-        `all feature statuses are within status_lifecycle [${lifecycle.join(', ')}]`
+        `all statuses across features+fix_features are within status_lifecycle [${lifecycle.join(', ')}]`
       );
     } else {
       record(

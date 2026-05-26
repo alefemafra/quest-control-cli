@@ -36,6 +36,7 @@ func main() {
 	p := tea.NewProgram(
 		internal.NewModel(dir, forceSetup, specSlug),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	if _, err := p.Run(); err != nil {
