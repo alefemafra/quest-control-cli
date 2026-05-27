@@ -16,8 +16,8 @@ func makeCriticSpecTree(t *testing.T, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
 	specDir := filepath.Join(root, "docs", "specs", "feature")
-	missionDir := filepath.Join(specDir, "mission")
-	if err := os.MkdirAll(missionDir, 0o755); err != nil {
+	artifactDir := filepath.Join(specDir, "quest")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	for name, content := range files {
@@ -26,7 +26,7 @@ func makeCriticSpecTree(t *testing.T, files map[string]string) string {
 		case "CLAUDE.md":
 			dest = filepath.Join(root, "CLAUDE.md")
 		default:
-			dest = filepath.Join(missionDir, name)
+			dest = filepath.Join(artifactDir, name)
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			t.Fatalf("mkdir parent: %v", err)
@@ -44,7 +44,7 @@ func makeCriticSpecTree(t *testing.T, files map[string]string) string {
 // also mentions these filenames.
 func resolveArtifactPaths(t *testing.T, specDir string) (contract, features, claudeMd, projCtx string) {
 	t.Helper()
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(specDir)))
 	contract = filepath.Join(missionDir, "validation-contract.md")
 	features = filepath.Join(missionDir, "features.json")

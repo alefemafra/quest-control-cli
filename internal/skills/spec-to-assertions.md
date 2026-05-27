@@ -3,7 +3,7 @@ name: spec-to-assertions
 description: >
   Batch-mode skill: receives a spec (and optional design/implementation docs)
   and emits black-box validation assertions as a single JSON array. No file
-  reads, no tools, no interaction. First call of the spec-to-mission v2
+  reads, no tools, no interaction. First call of the spec-to-quest v2
   pipeline; output feeds spec-to-features as input.
 ---
 

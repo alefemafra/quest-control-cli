@@ -420,7 +420,7 @@ func (wp *WorkerPool) recordFailureSignature(rootID, signature string) (count in
 	rootID = strings.TrimSpace(rootID)
 	signature = strings.TrimSpace(strings.ToLower(signature))
 	if rootID == "" {
-		rootID = "mission"
+		rootID = "quest"
 	}
 	if signature == "" {
 		signature = "unknown"
@@ -460,7 +460,7 @@ const (
 func normalizeRecoveryRootID(rootID string) string {
 	rootID = strings.TrimSpace(rootID)
 	if rootID == "" {
-		return "mission"
+		return "quest"
 	}
 	return rootID
 }

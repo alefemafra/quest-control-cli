@@ -179,10 +179,10 @@ func TestBuildKnowledgePromptV2_RendersFeatures(t *testing.T) {
 	if err := writeFile(specDir+"/spec.md", "## Goal\n\nTest spec.\n"); err != nil {
 		t.Fatalf("write spec: %v", err)
 	}
-	if err := writeFile(specDir+"/mission/codebase-analysis.md", "Reference pattern: foo\n"); err != nil {
+	if err := writeFile(specDir+"/quest/codebase-analysis.md", "Reference pattern: foo\n"); err != nil {
 		t.Fatalf("write analysis: %v", err)
 	}
-	if err := writeFile(specDir+"/mission/validation-contract.md", "## ui\n\n- **ui.1: Form renders**\n"); err != nil {
+	if err := writeFile(specDir+"/quest/validation-contract.md", "## ui\n\n- **ui.1: Form renders**\n"); err != nil {
 		t.Fatalf("write contract: %v", err)
 	}
 
@@ -215,7 +215,7 @@ func TestBuildFeaturesPrompt_RendersAssertionIDs(t *testing.T) {
 	if err := writeFile(specDir+"/spec.md", "## Goal\n\nTest spec.\n"); err != nil {
 		t.Fatalf("write spec: %v", err)
 	}
-	if err := writeFile(specDir+"/mission/codebase-analysis.md", "Reference pattern: foo\n"); err != nil {
+	if err := writeFile(specDir+"/quest/codebase-analysis.md", "Reference pattern: foo\n"); err != nil {
 		t.Fatalf("write analysis: %v", err)
 	}
 
@@ -235,7 +235,24 @@ func TestBuildFeaturesPrompt_RendersAssertionIDs(t *testing.T) {
 	}
 }
 
-// --- mission.go parsers ---
+func TestBuildFeaturesPrompt_LegacyMissionFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	specDir := tmpDir + "/spec"
+	if err := writeFile(specDir+"/spec.md", "## Goal\n\nLegacy path test.\n"); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+	if err := writeFile(specDir+"/mission/codebase-analysis.md", "Legacy analysis marker\n"); err != nil {
+		t.Fatalf("write analysis: %v", err)
+	}
+
+	ids := map[string][]string{"ui": {"ui.1"}}
+	out := BuildFeaturesPrompt(specDir, tmpDir, ids, "")
+	if !strings.Contains(out, "Legacy analysis marker") {
+		t.Error("should read legacy mission/codebase-analysis.md when quest/ is absent")
+	}
+}
+
+// --- quest artifact parsers ---
 
 func TestParseAssertionsOnlyJSON_ValidArray(t *testing.T) {
 	input := `[

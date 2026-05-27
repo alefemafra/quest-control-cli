@@ -225,7 +225,7 @@ func computeCriticPhaseInputHash(specDir string, phase criticPhase) string {
 	writePart("name:" + phase.Name)
 	writePart("criteria:" + phase.Criteria)
 	writePart("focus:" + phase.Focus)
-	writePart("skill:" + ReadSkill("mission-critic"))
+	writePart("skill:" + ReadSkill("quest-critic"))
 
 	artifacts := loadCriticPhaseArtifacts(specDir, phase)
 	for _, artifact := range artifacts {
@@ -237,7 +237,7 @@ func computeCriticPhaseInputHash(specDir string, phase criticPhase) string {
 }
 
 func loadCriticPhaseArtifacts(specDir string, phase criticPhase) []criticLoadedArtifact {
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(specDir)))
 
 	loadArtifact := func(name string) (criticLoadedArtifact, bool) {

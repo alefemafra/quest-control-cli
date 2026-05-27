@@ -14,7 +14,7 @@ func TestBuildCriticPhaseExecutionPlan_NoCacheRunsAll(t *testing.T) {
 		"CLAUDE.md":              "# architecture v1",
 		"project-context.md":     "# context v1",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	phases := []criticPhase{criticPhaseSpec, criticPhaseArch, criticPhaseDecomp}
 
 	plans, _ := buildCriticPhaseExecutionPlan(specDir, missionDir, phases)
@@ -38,7 +38,7 @@ func TestBuildCriticPhaseExecutionPlan_ReuseOnlyStablePassingPhases(t *testing.T
 		"CLAUDE.md":              "# architecture v1",
 		"project-context.md":     "# context v1",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	phases := []criticPhase{criticPhaseSpec, criticPhaseArch, criticPhaseDecomp}
 
 	state := newCriticPhaseState()
@@ -97,7 +97,7 @@ func TestBuildCriticPhaseExecutionPlan_ContractChangeInvalidatesAAndC(t *testing
 		"CLAUDE.md":              "# architecture v1",
 		"project-context.md":     "# context v1",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	phases := []criticPhase{criticPhaseSpec, criticPhaseArch, criticPhaseDecomp}
 
 	state := newCriticPhaseState()
@@ -145,7 +145,7 @@ func TestBuildCriticPhaseExecutionPlan_ArchitectureChangeInvalidatesOnlyB(t *tes
 		"CLAUDE.md":              "# architecture v1",
 		"project-context.md":     "# context v1",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	phases := []criticPhase{criticPhaseSpec, criticPhaseArch, criticPhaseDecomp}
 
 	state := newCriticPhaseState()
@@ -194,7 +194,7 @@ func TestBuildCriticPhaseExecutionPlan_CorruptCacheFallsBackToRerunAll(t *testin
 		"CLAUDE.md":              "# architecture v1",
 		"project-context.md":     "# context v1",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	phases := []criticPhase{criticPhaseSpec, criticPhaseArch, criticPhaseDecomp}
 
 	if err := os.MkdirAll(filepath.Join(missionDir, "runs"), 0o755); err != nil {
@@ -219,7 +219,7 @@ func TestCaptureCriticArtifactSnapshot_DetectsFeatureOnlyChange(t *testing.T) {
 		"CLAUDE.md":              "# claude",
 		"project-context.md":     "# context",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	before, err := captureCriticArtifactSnapshot(missionDir)
 	if err != nil {
@@ -277,7 +277,7 @@ func TestInvalidateCriticPhaseExecutionState_OnlyRemovesTargetedPhase(t *testing
 		"CLAUDE.md":              "# claude",
 		"project-context.md":     "# context",
 	})
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	state := newCriticPhaseState()
 	state.Phases["A"] = criticPhaseCacheEntry{PhaseID: "A", InputHash: "hash-A", Overall: "pass", Report: &CriticReport{Phase: "A", Overall: "pass"}}

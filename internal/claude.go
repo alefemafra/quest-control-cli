@@ -420,7 +420,7 @@ func (p *streamParser) extractToolResultLines(ev map[string]any) []string {
 }
 
 func BuildDiscoveryPrompt(description, projectDir string) string {
-	specSkill := ReadSkill("mission-spec")
+	specSkill := ReadSkill("quest-spec")
 	projectContext := GatherProjectContext(projectDir)
 
 	return strings.Join([]string{
@@ -432,7 +432,7 @@ func BuildDiscoveryPrompt(description, projectDir string) string {
 		"",
 		projectContext,
 		"",
-		"## Skill Reference (mission-spec methodology)",
+		"## Skill Reference (quest-spec methodology)",
 		"",
 		specSkill,
 		"",
@@ -440,7 +440,7 @@ func BuildDiscoveryPrompt(description, projectDir string) string {
 		"",
 		"1. Use the project context above as your baseline understanding of the codebase",
 		"2. Read additional files as needed to deepen your understanding",
-		"3. Based on the mission-spec methodology above, propose structured requirements for this feature",
+		"3. Based on the quest-spec methodology above, propose structured requirements for this feature",
 		"4. Ask clarifying questions about anything that is unclear or could go multiple ways",
 		"5. Identify potential risks, challenges, or things that might conflict with existing code",
 		"",
@@ -485,7 +485,7 @@ func BuildFollowUpPrompt(messages []ChatMessage, feedback, projectDir string) st
 }
 
 func BuildPlanPrompt(messages []ChatMessage, projectDir string) string {
-	skill := ReadSkill("spec-to-mission")
+	skill := ReadSkill("spec-to-quest")
 	projectContext := GatherProjectContext(projectDir)
 
 	var history strings.Builder
@@ -506,7 +506,7 @@ func BuildPlanPrompt(messages []ChatMessage, projectDir string) string {
 		"",
 		projectContext,
 		"",
-		"## Skill Reference (spec-to-mission methodology)",
+		"## Skill Reference (spec-to-quest methodology)",
 		"",
 		"Follow the assertion derivation rules and feature decomposition principles from this skill:",
 		"",
@@ -526,7 +526,7 @@ func BuildPlanPrompt(messages []ChatMessage, projectDir string) string {
 
 func BuildAnalysisPrompt(specDir, projectDir string, hasExistingAnalysis bool) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	filesToRead := []string{filepath.Join(specDir, "spec.md")}
 
@@ -608,9 +608,9 @@ func BuildSpecToPlanPrompt(specDir, projectDir, analysisPath string) string {
 	slug := filepath.Base(specDir)
 
 	if analysisPath != "" {
-		missionDir := filepath.Join(specDir, "mission")
-		skillPath := filepath.Join(missionDir, "spec-to-mission-skill.md")
-		os.WriteFile(skillPath, []byte(ReadSkill("spec-to-mission")), 0o644)
+		missionDir := ResolveArtifactDir(specDir)
+		skillPath := filepath.Join(missionDir, "spec-to-quest-skill.md")
+		os.WriteFile(skillPath, []byte(ReadSkill("spec-to-quest")), 0o644)
 
 		filesToRead := []string{analysisPath, skillPath, filepath.Join(specDir, "spec.md")}
 
@@ -638,8 +638,8 @@ func BuildSpecToPlanPrompt(specDir, projectDir, analysisPath string) string {
 		}, "\n")
 	}
 
-	skill := ReadSkill("spec-to-mission")
-	projectContext := loadProjectContext(filepath.Join(specDir, "mission"), projectDir)
+	skill := ReadSkill("spec-to-quest")
+	projectContext := loadProjectContext(ResolveArtifactDir(specDir), projectDir)
 
 	var context strings.Builder
 	context.WriteString("## Spec\n\n")
@@ -656,7 +656,7 @@ func BuildSpecToPlanPrompt(specDir, projectDir, analysisPath string) string {
 	}
 
 	parts := []string{
-		"You are executing the spec-to-mission skill. Follow it precisely.",
+		"You are executing the spec-to-quest skill. Follow it precisely.",
 		"",
 		"## Project Context",
 		"",
@@ -749,12 +749,12 @@ func BuildAssertionPrompt(specDir string) string {
 // Kept for standalone testing and migration fallback.
 func BuildSkillPrompt(specDir, projectDir string) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
-	tmpFile, err := os.CreateTemp("", "spec-to-mission-*.md")
+		tmpFile, err := os.CreateTemp("", "spec-to-quest-*.md")
 	skillPath := ""
 	if err == nil {
-		tmpFile.WriteString(ReadSkill("spec-to-mission"))
+		tmpFile.WriteString(ReadSkill("spec-to-quest"))
 		tmpFile.Close()
 		skillPath = tmpFile.Name()
 	}
@@ -780,7 +780,7 @@ func BuildSkillPrompt(specDir, projectDir string) string {
 	return strings.Join([]string{
 		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing. Just act.",
 		"",
-		"Execute the spec-to-mission skill for docs/specs/" + slug + "/.",
+		"Execute the spec-to-quest skill for docs/specs/" + slug + "/.",
 		"",
 		"Read these files:",
 		fileList.String(),
@@ -867,7 +867,7 @@ func BuildAssertionsPrompt(specDir, projectDir string, retryFeedback string) str
 // features that reference them. All inputs are inlined.
 func BuildFeaturesPrompt(specDir, projectDir string, assertionIDs map[string][]string, retryFeedback string) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	skill := ReadSkill("spec-to-features")
 	spec := readFileContent(filepath.Join(specDir, "spec.md"))
@@ -948,7 +948,7 @@ func BuildFeaturesPrompt(specDir, projectDir string, assertionIDs map[string][]s
 // IDs and scopes. Designed for sonnet (cheaper, faster, sufficient quality).
 func BuildKnowledgePromptV2(specDir, projectDir string, features []Feature, retryFeedback string) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	skill := ReadSkill("spec-to-knowledge")
 	spec := readFileContent(filepath.Join(specDir, "spec.md"))
@@ -1344,7 +1344,7 @@ func CompactKnowledge(knowledge string) string {
 // Deprecated: kept for standalone testing. The pipeline uses BuildSkillPrompt instead.
 func BuildFeaturesOnlyPrompt(specDir string) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	skill := ReadSkill("feature-decomposer")
 	contract := compactContract(filepath.Join(missionDir, "validation-contract.md"))
@@ -1389,7 +1389,7 @@ func BuildFeaturesOnlyPrompt(specDir string) string {
 // Deprecated: kept for standalone testing. The pipeline uses BuildSkillPrompt instead.
 func BuildKnowledgePrompt(specDir string) string {
 	slug := filepath.Base(specDir)
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	spec := readFileContent(filepath.Join(specDir, "spec.md"))
 	analysis := readFileContent(filepath.Join(missionDir, "codebase-analysis.md"))
@@ -1436,7 +1436,7 @@ func BuildKnowledgePrompt(specDir string) string {
 }
 
 func BuildRegenPlanPrompt(specDir, missionDir, projectDir string) string {
-	skill := ReadSkill("spec-to-mission")
+	skill := ReadSkill("spec-to-quest")
 	projectContext := loadProjectContext(missionDir, projectDir)
 
 	specContent := readFileContent(filepath.Join(specDir, "spec.md"))
@@ -1502,7 +1502,7 @@ func BuildRegenPlanPrompt(specDir, missionDir, projectDir string) string {
 }
 
 func BuildRefinePlanPrompt(feedback, specDir, projectDir string) string {
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	projectContext := loadProjectContext(missionDir, projectDir)
 
 	return strings.Join([]string{
@@ -1524,8 +1524,8 @@ func BuildRefinePlanPrompt(feedback, specDir, projectDir string) string {
 }
 
 func BuildEditDiscoveryPrompt(description, specDir, projectDir string) string {
-	specSkill := ReadSkill("mission-spec")
-	missionDir := filepath.Join(specDir, "mission")
+	specSkill := ReadSkill("quest-spec")
+	missionDir := ResolveArtifactDir(specDir)
 	projectContext := loadProjectContext(missionDir, projectDir)
 
 	specContent := readFileContent(filepath.Join(specDir, "spec.md"))
@@ -1553,7 +1553,7 @@ func BuildEditDiscoveryPrompt(description, specDir, projectDir string) string {
 		"",
 		contractContent,
 		"",
-		"## Skill Reference (mission-spec methodology)",
+		"## Skill Reference (quest-spec methodology)",
 		"",
 		specSkill,
 		"",
@@ -1579,8 +1579,8 @@ func BuildEditDiscoveryPrompt(description, specDir, projectDir string) string {
 }
 
 func BuildEditPlanPrompt(messages []ChatMessage, specDir, projectDir string) string {
-	specSkill := ReadSkill("mission-spec")
-	missionDir := filepath.Join(specDir, "mission")
+	specSkill := ReadSkill("quest-spec")
+	missionDir := ResolveArtifactDir(specDir)
 	slug := filepath.Base(specDir)
 	projectContext := loadProjectContext(missionDir, projectDir)
 
@@ -1613,7 +1613,7 @@ func BuildEditPlanPrompt(messages []ChatMessage, specDir, projectDir string) str
 		"",
 		contractContent,
 		"",
-		"## Skill Reference (mission-spec methodology)",
+		"## Skill Reference (quest-spec methodology)",
 		"",
 		specSkill,
 		"",
@@ -1636,8 +1636,8 @@ func BuildEditPlanPrompt(messages []ChatMessage, specDir, projectDir string) str
 }
 
 func BuildWorkerPrompt(feature Feature, siblings []string, contract, knowledge, specPath, projectDir, failureContext string) string {
-	workerSkill := ReadSkill("mission-worker")
-	missionDir := filepath.Join(specPath, "mission")
+	workerSkill := ReadSkill("quest-worker")
+	missionDir := ResolveArtifactDir(specPath)
 	projectContext := loadProjectContext(missionDir, projectDir)
 
 	var parts []string
@@ -1646,7 +1646,7 @@ func BuildWorkerPrompt(feature Feature, siblings []string, contract, knowledge, 
 		"",
 		projectContext,
 		"",
-		"## Skill Reference (mission-worker methodology)",
+		"## Skill Reference (quest-worker methodology)",
 		"",
 		workerSkill,
 		"",

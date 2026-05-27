@@ -42,6 +42,23 @@ function readFileSafe(p) {
   }
 }
 
+function resolveArtifactDir(project) {
+  const questDir = path.join(project, 'quest');
+  const missionDir = path.join(project, 'mission');
+
+  const questHasArtifacts =
+    fs.existsSync(path.join(questDir, 'features.json')) ||
+    fs.existsSync(path.join(questDir, 'validation-contract.md'));
+  const missionHasArtifacts =
+    fs.existsSync(path.join(missionDir, 'features.json')) ||
+    fs.existsSync(path.join(missionDir, 'validation-contract.md'));
+
+  if (questHasArtifacts) return { dir: questDir, name: 'quest' };
+  if (missionHasArtifacts) return { dir: missionDir, name: 'mission' };
+
+  return { dir: questDir, name: 'quest' };
+}
+
 function parseValidationContract(content) {
   const assertions = [];
   const lines = content.split('\n');
@@ -65,11 +82,11 @@ function parseValidationContract(content) {
   return assertions;
 }
 
-function checkSpec(project) {
-  const contractPath = path.join(project, 'mission/validation-contract.md');
+function checkSpec(project, artifactDir) {
+  const contractPath = path.join(artifactDir.dir, 'validation-contract.md');
   const content = readFileSafe(contractPath);
   if (content === null) {
-    record('M-S0', 'spec', 'fail', `mission/validation-contract.md not found at ${contractPath}`);
+    record('M-S0', 'spec', 'fail', `${artifactDir.name}/validation-contract.md not found at ${contractPath}`);
     return { assertions: [] };
   }
 
@@ -275,11 +292,11 @@ function findCycles(graph) {
   return cycles;
 }
 
-function checkDecomposition(project, assertions) {
-  const featuresPath = path.join(project, 'mission/features.json');
+function checkDecomposition(project, assertions, artifactDir) {
+  const featuresPath = path.join(artifactDir.dir, 'features.json');
   const content = readFileSafe(featuresPath);
   if (content === null) {
-    record('M-D0', 'decomposition', 'fail', `mission/features.json not found at ${featuresPath}`);
+    record('M-D0', 'decomposition', 'fail', `${artifactDir.name}/features.json not found at ${featuresPath}`);
     return;
   }
 
@@ -287,7 +304,7 @@ function checkDecomposition(project, assertions) {
   try {
     data = JSON.parse(content);
   } catch (e) {
-    record('M-D0', 'decomposition', 'fail', `mission/features.json is not valid JSON: ${e.message}`);
+    record('M-D0', 'decomposition', 'fail', `${artifactDir.name}/features.json is not valid JSON: ${e.message}`);
     return;
   }
 
@@ -471,9 +488,10 @@ function render(results, format) {
 
 function main() {
   const { project, root, format } = parseArgs();
-  const { assertions } = checkSpec(project);
+  const artifactDir = resolveArtifactDir(project);
+  const { assertions } = checkSpec(project, artifactDir);
   checkArchitecture(root);
-  checkDecomposition(project, assertions);
+  checkDecomposition(project, assertions, artifactDir);
   render(results, format);
   process.exit(results.some(r => r.status === 'fail') ? 1 : 0);
 }

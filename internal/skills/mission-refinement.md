@@ -1,9 +1,9 @@
 ---
-name: mission-refinement
-description: Use to process Validator results inside a project that follows Missions Architecture. Reads from docs/specs/<slug>/mission/ artifacts. Converts FAILs into minimum-scope fix features, with traceability to the failing assertion and the original feature. Does not implement — only plans.
+name: quest-refinement
+description: Use to process Validator results inside a project that follows Missions Architecture. Reads from docs/specs/<slug>/quest/ artifacts (legacy mission/ supported). Converts FAILs into minimum-scope fix features, with traceability to the failing assertion and the original feature. Does not implement — only plans.
 ---
 
-# Mission Refinement
+# Quest Refinement
 
 You convert validation results into fix features. You do not implement — you plan the next round of work so that the next validation has a chance of passing.
 

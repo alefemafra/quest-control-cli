@@ -17,7 +17,11 @@ type MissionLogger struct {
 }
 
 func NewMissionLogger(missionDir string) (*MissionLogger, error) {
-	logDir := filepath.Join(missionDir, "mission", "logs")
+	logDir := filepath.Join(missionDir, "logs")
+	legacyLogDir := filepath.Join(missionDir, "mission", "logs")
+	if fileExists(legacyLogDir) && !fileExists(logDir) {
+		logDir = legacyLogDir
+	}
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, err
 	}

@@ -1,9 +1,9 @@
 ---
-name: init-mission
-description: Bootstrap or adopt Missions Architecture in a project. Auto-detects greenfield vs brownfield - creates full structure for new projects (asks architecture, languages, frameworks, hosting), or appends to existing CLAUDE.md/README/.gitignore and creates mission/ folder for existing projects (auto-detects stack, owner, hosting from repo files). Triggers - "init mission" / "/init-mission" / "bootstrap mission project" / "adopt missions architecture" / "retrofit mission" / "add mission to this project".
+name: init-quest
+description: Bootstrap or adopt Missions Architecture in a project. Auto-detects greenfield vs brownfield - creates full structure for new projects (asks architecture, languages, frameworks, hosting), or appends to existing CLAUDE.md/README/.gitignore and creates quest/ folder for existing projects (legacy mission/ supported). Triggers - "init quest" / "/init-quest" / "bootstrap quest project" / "adopt missions architecture" / "retrofit quest" / "add quest to this project" (legacy: init mission / /init-mission).
 ---
 
-# Init Mission
+# Init Quest
 
 Bootstrap or adopt Missions Architecture. Works in EMPTY directories (greenfield) AND in directories with existing code (brownfield).
 

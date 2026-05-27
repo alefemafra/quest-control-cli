@@ -25,8 +25,9 @@ func ScanSpecs(projectDir string) []SpecEntry {
 		}
 
 		hasSpec := fileExists(filepath.Join(path, "spec.md"))
+		hasQuest := fileExists(filepath.Join(path, "quest", "features.json"))
 		hasMission := fileExists(filepath.Join(path, "mission", "features.json"))
-		if !hasSpec && !hasMission {
+		if !hasSpec && !hasQuest && !hasMission {
 			return nil
 		}
 
@@ -36,7 +37,7 @@ func ScanSpecs(projectDir string) []SpecEntry {
 		}
 		seen[rel] = true
 
-		missionDir := filepath.Join(path, "mission")
+		missionDir := ResolveArtifactDir(path)
 		state := ReadMissionState(missionDir)
 		title := extractSpecTitle(path)
 		if title == "" {
@@ -158,7 +159,7 @@ func ReadMissionState(missionDir string) MissionState {
 }
 
 func WriteMissionFiles(specDir, projectDir string, plan PlanData) error {
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	runsDir := filepath.Join(missionDir, "runs")
 	designsDir := filepath.Join(specDir, "designs")
 
@@ -239,7 +240,7 @@ func buildManifestForWrite(featuresPath string, plan PlanData, specRelPath strin
 
 	existingData, err := os.ReadFile(featuresPath)
 	if err != nil {
-		// New mission write.
+		// New artifact write.
 		return FeaturesManifest{
 			Spec:            specRelPath,
 			StatusLifecycle: defaultLifecycle,

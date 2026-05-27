@@ -9,7 +9,7 @@ import (
 )
 
 func BuildValidatorPrompt(feature Feature, missionDir, specDir string) string {
-	validatorSkill := ReadSkill("mission-validator")
+	validatorSkill := ReadSkill("quest-validator")
 
 	contract := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
 	filtered := FilterContractAssertions(contract, feature.ValidationRefs)
@@ -20,7 +20,7 @@ func BuildValidatorPrompt(feature Feature, missionDir, specDir string) string {
 
 	var parts []string
 	parts = append(parts,
-		"You are running the mission-validator skill. Follow it precisely.",
+		"You are running the quest-validator skill. Follow it precisely.",
 		"",
 		"## Skill Reference",
 		"",

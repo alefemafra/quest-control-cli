@@ -1,9 +1,9 @@
 ---
-name: mission-critic
-description: Reviews specs, architecture, and decomposition against the criteria in CRITERIA.md before any worker is spawned. Three independent phases — A (validation-contract.md), B (architecture section of CLAUDE.md), C (features.json). Accepts a feature folder path (docs/specs/<slug>/) to locate artifacts. Runs mechanical [M] checks first; only if those pass does it apply judgment [J] criteria with concrete rewrite suggestions. Read-only on the artifact — never edits. Triggers — "critique spec" / "critique architecture" / "critique decomposition" / "run critic phase A|B|C" / "run mission critic" / "/mission-critic".
+name: quest-critic
+description: Reviews specs, architecture, and decomposition against the criteria in CRITERIA.md before any worker is spawned. Three independent phases — A (validation-contract.md), B (architecture section of CLAUDE.md), C (features.json). Accepts a feature folder path (docs/specs/<slug>/) to locate artifacts. Runs mechanical [M] checks first; only if those pass does it apply judgment [J] criteria with concrete rewrite suggestions. Read-only on the artifact — never edits. Triggers — "critique spec" / "critique architecture" / "critique decomposition" / "run critic phase A|B|C" / "run quest critic" / "/quest-critic" (legacy: /mission-critic).
 ---
 
-# Mission Critic
+# Quest Critic
 
 A read-only agent. Its only output is a structured report telling the author what is wrong and how to fix it concretely. Acts as the gate the orchestrator consults before spawning any worker.
 

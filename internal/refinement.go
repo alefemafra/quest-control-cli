@@ -10,7 +10,7 @@ import (
 )
 
 func BuildRefinementPrompt(feature Feature, report ValidatorReport, missionDir, specDir string) string {
-	refinementSkill := ReadSkill("mission-refinement")
+	refinementSkill := ReadSkill("quest-refinement")
 
 	contract := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
 	knowledge := readFileContent(filepath.Join(missionDir, "knowledge-base.md"))
@@ -28,7 +28,7 @@ func BuildRefinementPrompt(feature Feature, report ValidatorReport, missionDir, 
 
 	var parts []string
 	parts = append(parts,
-		"You are running the mission-refinement skill. Follow it precisely.",
+		"You are running the quest-refinement skill. Follow it precisely.",
 		"",
 		"## Skill Reference",
 		"",

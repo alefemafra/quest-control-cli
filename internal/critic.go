@@ -275,8 +275,8 @@ func RunCriticGate(projectDir, missionDir string, verbose *bool, eventCh chan Wo
 // Kept for the fix-critic flow and for emergency rollback. Will be removed
 // after the split has shipped successfully end-to-end.
 func BuildCriticPrompt(specDir string) string {
-	criticSkill := ReadSkill("mission-critic")
-	missionDir := filepath.Join(specDir, "mission")
+	criticSkill := ReadSkill("quest-critic")
+	missionDir := ResolveArtifactDir(specDir)
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(specDir)))
 
 	priorReports := readLatestCriticReport(missionDir)
@@ -313,7 +313,7 @@ func BuildCriticPrompt(specDir string) string {
 	parts = append(parts,
 		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing. Just act.",
 		"",
-		"You are running the mission-critic skill. Follow it precisely.",
+		"You are running the quest-critic skill. Follow it precisely.",
 		"",
 		"## Skill Reference",
 		"",
@@ -365,8 +365,8 @@ func BuildCriticPrompt(specDir string) string {
 // This mirrors how BuildFixCriticPrompt already runs and is the proven path
 // for fast, deterministic critic output.
 func BuildCriticPhasePrompt(specDir string, phase criticPhase) string {
-	criticSkill := ReadSkill("mission-critic")
-	missionDir := filepath.Join(specDir, "mission")
+	criticSkill := ReadSkill("quest-critic")
+	missionDir := ResolveArtifactDir(specDir)
 
 	priorReports := readLatestCriticReport(missionDir)
 	artifacts := loadCriticPhaseArtifacts(specDir, phase)
@@ -375,7 +375,7 @@ func BuildCriticPhasePrompt(specDir string, phase criticPhase) string {
 	parts = append(parts,
 		"IMPORTANT: Do NOT narrate, explain, or describe what you are doing. Just emit the JSON.",
 		"",
-		fmt.Sprintf("You are running the mission-critic skill — Phase %s (%s).", phase.ID, phase.Name),
+		fmt.Sprintf("You are running the quest-critic skill — Phase %s (%s).", phase.ID, phase.Name),
 		phase.Focus,
 		"",
 		"## Skill Reference",
@@ -777,8 +777,8 @@ func RunFixCriticGate(projectDir, missionDir string, fixes []Feature, verbose *b
 }
 
 func BuildFixCriticPrompt(specDir string, fixes []Feature) string {
-	criticSkill := ReadSkill("mission-critic")
-	missionDir := filepath.Join(specDir, "mission")
+	criticSkill := ReadSkill("quest-critic")
+	missionDir := ResolveArtifactDir(specDir)
 
 	contract := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
 	features := readFileContent(filepath.Join(missionDir, "features.json"))
@@ -841,6 +841,10 @@ func criteriaMdPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
+	}
+	questPath := filepath.Join(home, ".claude", "skills", "quest-critic", "CRITERIA.md")
+	if fileExists(questPath) {
+		return questPath
 	}
 	return filepath.Join(home, ".claude", "skills", "mission-critic", "CRITERIA.md")
 }
@@ -1028,7 +1032,7 @@ func truncateContent(s string, maxChars int) string {
 }
 
 func BuildAutoFixPrompt(report *CriticReport, specDir, projectDir string) string {
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(specDir)))
 
 	var findings []CriticFinding
@@ -1205,7 +1209,7 @@ func RunCriticBlockingAutoFix(report *CriticReport, specDir, projectDir string, 
 }
 
 func BuildBlockingAutoFixPrompt(report *CriticReport, specDir, projectDir string) string {
-	missionDir := filepath.Join(specDir, "mission")
+	missionDir := ResolveArtifactDir(specDir)
 
 	findings := report.BlockingFailures()
 	if len(findings) == 0 {

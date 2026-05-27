@@ -85,7 +85,7 @@ type FeaturesManifest struct {
 	FixFeatures     []Feature `json:"fix_features"`
 }
 
-type MissionStats struct {
+type QuestStats struct {
 	Total              int
 	Done               int
 	DoneDirect         int
@@ -101,14 +101,18 @@ type MissionStats struct {
 	Refining           int
 }
 
-type MissionState struct {
+type MissionStats = QuestStats
+
+type QuestState struct {
 	Exists   bool
 	Project  string
 	Owner    string
 	Features []Feature
-	Stats    MissionStats
+	Stats    QuestStats
 	Path     string
 }
+
+type MissionState = QuestState
 
 type ClaudeStreamMsg struct {
 	Line      string

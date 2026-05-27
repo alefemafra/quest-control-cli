@@ -82,7 +82,7 @@ func GatherProjectContext(projectDir string) string {
 		sb.WriteString("## CLAUDE.md\n\n")
 		sb.WriteString(claudeMd + "\n")
 	} else {
-		sb.WriteString("## CLAUDE.md\nNot found — consider creating with init-mission.\n")
+		sb.WriteString("## CLAUDE.md\nNot found — consider creating with init-quest (legacy: init-mission).\n")
 	}
 
 	return sb.String()

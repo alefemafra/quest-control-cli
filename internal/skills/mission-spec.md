@@ -1,19 +1,19 @@
 ---
-name: mission-spec
+name: quest-spec
 description: >
   Spec-driven entry point for Missions Architecture. Takes a raw feature idea,
   produces a self-contained feature folder at docs/specs/<slug>/ with spec.md,
   validation-contract.md, features.json, knowledge-base.md, and optionally a
-  design prompt. Everything the mission engine needs lives inside that folder.
-  Use when the user says "spec this", "plan a feature", "mission spec for X",
-  "create a mission spec", or invokes /mission-spec. Do NOT use for trivial
+  design prompt. Everything the quest engine needs lives inside that folder.
+  Use when the user says "spec this", "plan a feature", "quest spec for X",
+  "create a quest spec", or invokes /quest-spec (legacy: /mission-spec). Do NOT use for trivial
   fixes (no spec needed) or when a spec already exists for this feature.
 ---
 
-# /mission-spec
+# /quest-spec
 
 One command to go from raw feature idea → complete spec → validation-contract
-assertions → features.json decomposition → ready for mission-orchestrator.
+assertions → features.json decomposition → ready for quest-orchestrator.
 
 Everything lives in `docs/specs/<slug>/`. If `docs/` doesn't exist, create it.
 
@@ -26,7 +26,7 @@ docs/specs/<slug>/
 ├── spec.md                      # full technical spec
 ├── design-prompt.md             # optional, if design is needed
 ├── designs/                     # screenshots from design tool
-└── mission/
+└── quest/   # legacy name supported: mission/
     ├── validation-contract.md   # black-box assertions for this feature
     ├── features.json            # task decomposition for this feature
     ├── knowledge-base.md        # decisions and learnings

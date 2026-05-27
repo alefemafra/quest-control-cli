@@ -21,16 +21,16 @@ func TestAutonomousRuntimeState_SaveAndLoad(t *testing.T) {
 			"F01": 3,
 		},
 		CriticTransientAttempt: map[string]int{
-			"mission": 2,
+			"quest": 2,
 		},
 		CriticStructuralTry: map[string]int{
-			"mission": 1,
+			"quest": 1,
 		},
 		CriticAutoFixAttempt: map[string]int{
-			"mission": 3,
+			"quest": 3,
 		},
 		CriticBypassCount: map[string]int{
-			"mission": 4,
+			"quest": 4,
 		},
 		AutoResetCount: 1,
 		AutoRegenCount: 0,
@@ -53,16 +53,16 @@ func TestAutonomousRuntimeState_SaveAndLoad(t *testing.T) {
 	if loaded.AutoResetCount != 1 {
 		t.Fatalf("expected auto reset count=1, got %d", loaded.AutoResetCount)
 	}
-	if got := loaded.CriticTransientAttempt["mission"]; got != 2 {
+	if got := loaded.CriticTransientAttempt["quest"]; got != 2 {
 		t.Fatalf("expected critic transient attempt=2, got %d", got)
 	}
-	if got := loaded.CriticStructuralTry["mission"]; got != 1 {
+	if got := loaded.CriticStructuralTry["quest"]; got != 1 {
 		t.Fatalf("expected critic structural attempt=1, got %d", got)
 	}
-	if got := loaded.CriticAutoFixAttempt["mission"]; got != 3 {
+	if got := loaded.CriticAutoFixAttempt["quest"]; got != 3 {
 		t.Fatalf("expected critic auto-fix attempt=3, got %d", got)
 	}
-	if got := loaded.CriticBypassCount["mission"]; got != 4 {
+	if got := loaded.CriticBypassCount["quest"]; got != 4 {
 		t.Fatalf("expected critic bypass count=4, got %d", got)
 	}
 	if loaded.UpdatedAt == "" {
@@ -76,10 +76,10 @@ func TestUpdateAutonomousRuntimeState_CreatesFile(t *testing.T) {
 		state.LastSessionIDs[autonomousSessionKey("critic", "phase-A")] = "critic-session"
 		state.FailureSignatures["F01|sig"] = 1
 		state.RecoveryLevel["F01"] = 1
-		state.CriticTransientAttempt["mission"] = 1
-		state.CriticStructuralTry["mission"] = 1
-		state.CriticAutoFixAttempt["mission"] = 1
-		state.CriticBypassCount["mission"] = 1
+		state.CriticTransientAttempt["quest"] = 1
+		state.CriticStructuralTry["quest"] = 1
+		state.CriticAutoFixAttempt["quest"] = 1
+		state.CriticBypassCount["quest"] = 1
 	})
 	if err != nil {
 		t.Fatalf("update autonomous state: %v", err)
@@ -318,7 +318,7 @@ func TestDecideCriticRecoveryAction_BoundedThenBypass(t *testing.T) {
 	}
 
 	for i := 1; i <= criticStructuralBudget; i++ {
-		action, attempt, _ := wp.decideCriticRecoveryAction("mission", report)
+		action, attempt, _ := wp.decideCriticRecoveryAction("quest", report)
 		if action != criticRecoveryRetryStructural {
 			t.Fatalf("expected structural recovery action at step %d, got %v", i, action)
 		}
@@ -327,7 +327,7 @@ func TestDecideCriticRecoveryAction_BoundedThenBypass(t *testing.T) {
 		}
 	}
 
-	action, bypassCount, _ := wp.decideCriticRecoveryAction("mission", report)
+	action, bypassCount, _ := wp.decideCriticRecoveryAction("quest", report)
 	if action != criticRecoveryBypass {
 		t.Fatalf("expected critic bypass action after structural budget, got %v", action)
 	}
@@ -336,11 +336,11 @@ func TestDecideCriticRecoveryAction_BoundedThenBypass(t *testing.T) {
 	}
 
 	loaded := loadAutonomousRuntimeState(missionDir)
-	if loaded.CriticStructuralTry["mission"] != criticStructuralBudget+1 {
-		t.Fatalf("expected persisted structural attempts=%d, got %d", criticStructuralBudget+1, loaded.CriticStructuralTry["mission"])
+	if loaded.CriticStructuralTry["quest"] != criticStructuralBudget+1 {
+		t.Fatalf("expected persisted structural attempts=%d, got %d", criticStructuralBudget+1, loaded.CriticStructuralTry["quest"])
 	}
-	if loaded.CriticBypassCount["mission"] != 1 {
-		t.Fatalf("expected persisted bypass count=1, got %d", loaded.CriticBypassCount["mission"])
+	if loaded.CriticBypassCount["quest"] != 1 {
+		t.Fatalf("expected persisted bypass count=1, got %d", loaded.CriticBypassCount["quest"])
 	}
 }
 
@@ -357,7 +357,7 @@ func TestDecideCriticRecoveryAction_TransientThenStructural(t *testing.T) {
 	}
 
 	for i := 1; i <= criticTransientBudget; i++ {
-		action, attempt, _ := wp.decideCriticRecoveryAction("mission", transientReport)
+		action, attempt, _ := wp.decideCriticRecoveryAction("quest", transientReport)
 		if action != criticRecoveryRetryTransient {
 			t.Fatalf("expected transient retry at %d, got %v", i, action)
 		}
@@ -366,7 +366,7 @@ func TestDecideCriticRecoveryAction_TransientThenStructural(t *testing.T) {
 		}
 	}
 
-	action, attempt, _ := wp.decideCriticRecoveryAction("mission", transientReport)
+	action, attempt, _ := wp.decideCriticRecoveryAction("quest", transientReport)
 	if action != criticRecoveryRetryStructural {
 		t.Fatalf("expected structural escalation after transient budget, got %v", action)
 	}
@@ -382,8 +382,8 @@ func TestTryAutonomousCriticAutoFix_SuccessInvalidatesOnlyImpactedPhase(t *testi
 		"CLAUDE.md":              "# architecture",
 		"project-context.md":     "# context",
 	})
-	missionDir := filepath.Join(specDir, "mission")
-	rootID := "mission"
+	missionDir := ResolveArtifactDir(specDir)
+	rootID := "quest"
 
 	state := newCriticPhaseState()
 	state.Phases["A"] = criticPhaseCacheEntry{
@@ -471,8 +471,8 @@ func TestTryAutonomousCriticAutoFix_NoArtifactChangeKeepsCache(t *testing.T) {
 		"CLAUDE.md":              "# architecture",
 		"project-context.md":     "# context",
 	})
-	missionDir := filepath.Join(specDir, "mission")
-	rootID := "mission"
+	missionDir := ResolveArtifactDir(specDir)
+	rootID := "quest"
 
 	state := newCriticPhaseState()
 	state.Phases["A"] = criticPhaseCacheEntry{PhaseID: "A", InputHash: "hA", Overall: "pass", Report: &CriticReport{Phase: "A", Overall: "pass"}}
@@ -514,7 +514,7 @@ func TestTryAutonomousCriticAutoFix_NoArtifactChangeKeepsCache(t *testing.T) {
 }
 
 func TestTryAutonomousCriticAutoFix_BudgetExhaustedFallsBack(t *testing.T) {
-	rootID := "mission"
+	rootID := "quest"
 	called := false
 
 	wp := &WorkerPool{
@@ -547,7 +547,7 @@ func TestTryAutonomousCriticAutoFix_BudgetExhaustedFallsBack(t *testing.T) {
 }
 
 func TestTryAutonomousCriticAutoFix_AdvisoryOnlySkipsAutoFix(t *testing.T) {
-	rootID := "mission"
+	rootID := "quest"
 	called := false
 
 	wp := &WorkerPool{
