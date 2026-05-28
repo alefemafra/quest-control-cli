@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        run: |
+          declare -A targets=(
+            ["darwin-arm64"]="darwin arm64"
+            ["darwin-x64"]="darwin amd64"
+            ["linux-arm64"]="linux arm64"
+            ["linux-x64"]="linux amd64"
+            ["win32-x64"]="windows amd64"
+          )
+
+          for key in "${!targets[@]}"; do
+            read -r goos goarch <<< "${targets[$key]}"
+            outdir="dist/$key"
+            mkdir -p "$outdir"
+
+            ext=""
+            if [ "$goos" = "windows" ]; then ext=".exe"; fi
+
+            echo "Building quest for $goos/$goarch..."
+            GOOS="$goos" GOARCH="$goarch" go build \
+              -ldflags "-s -w -X 'main.version=${{ steps.version.outputs.tag }}'" \
+              -o "$outdir/quest${ext}" .
+          done
+
+      - name: Package archives
+        run: |
+          mkdir -p archives
+
+          for dir in dist/*/; do
+            key=$(basename "$dir")
+            if [[ "$key" == "win32-x64" ]]; then
+              (cd "$dir" && zip "../../archives/quest-${key}.zip" quest.exe)
+            else
+              tar czf "archives/quest-${key}.tar.gz" -C "$dir" quest
+            fi
+          done
+
+      - name: Create GitHub Release (draft)
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            archives/* \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes \
+            --draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish to npm
+        working-directory: npm
+        run: |
+          npm version "${{ steps.version.outputs.version }}" --no-git-tag-version
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish GitHub Release
+        run: |
+          gh release edit "${{ steps.version.outputs.tag }}" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

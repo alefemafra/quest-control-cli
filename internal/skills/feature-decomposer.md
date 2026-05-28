@@ -14,11 +14,13 @@ You have been given:
 
 Break the spec into features. Quality of decomposition determines quality of execution.
 
-- Each feature completable in **ONE worker session** (1-3 functional requirements, 3-8 assertions).
+- Each feature completable in **ONE worker session** (1-4 functional requirements, 2-5 assertions).
 - Each feature **independently validatable** — its assertions can be tested without other features (unless in `depends_on`).
 - Order by **dependency**: schemas before hooks, hooks before components, infrastructure before consumers.
-- Feature with >8 `validation_refs` is too big — split it.
+- Feature with >5 `validation_refs` → split it. Target 2-5 refs per feature.
+- Feature with >6 `validation_refs` → MUST split. Workers fail reliably above this threshold.
 - Feature with 0 `validation_refs` has unclear scope — every feature must be validatable.
+- Prefer more focused features over fewer large ones.
 - `depends_on` must be accurate — if F04 uses hooks from F03, declare it.
 
 ## Standard Phase Pattern

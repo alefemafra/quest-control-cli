@@ -1,0 +1,37 @@
+{
+  "name": "quest-cli",
+  "version": "0.0.0",
+  "description": "Quest — spec-driven development mission orchestrator",
+  "bin": {
+    "quest": "./bin/quest"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js"
+  },
+  "keywords": [
+    "cli",
+    "quest",
+    "mission",
+    "spec-driven",
+    "development",
+    "orchestrator"
+  ],
+  "author": "alefemafra",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alefemafra/quest-cli.git"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

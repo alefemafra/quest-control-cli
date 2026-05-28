@@ -11,6 +11,22 @@ import (
 	"mission/internal"
 )
 
+var version = "dev"
+
+func printHelp() {
+	fmt.Println(`Quest — spec-driven development mission orchestrator
+
+Usage:
+  quest                     Launch dashboard (auto-discovers specs)
+  quest <slug>              Jump directly to a spec's dashboard
+  quest new                 Start a new spec creation flow
+  quest <path>              Use a specific project directory
+
+Flags:
+  -h, --help                Show this help message
+  -v, --version             Show version`)
+}
+
 func main() {
 	dir, _ := os.Getwd()
 	forceSetup := false
@@ -18,6 +34,12 @@ func main() {
 
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
+		case "-h", "--help":
+			printHelp()
+			os.Exit(0)
+		case "-v", "--version":
+			fmt.Printf("quest %s\n", version)
+			os.Exit(0)
 		case "new":
 			forceSetup = true
 		default:
