@@ -119,6 +119,15 @@ func validateFeaturesCoverage(features []Feature, knownIDs map[string][]string) 
 				"Feature %s has 0 validation_refs. Every feature must reference >=1 assertion ID.",
 				fid))
 		}
+		if len(f.ValidationRefs) > 6 {
+			issues = append(issues, fmt.Sprintf(
+				"Feature %s has %d validation_refs (max 6). Split into smaller features with 2-5 refs each so a single worker session can complete reliably.",
+				fid, len(f.ValidationRefs)))
+		} else if len(f.ValidationRefs) > 5 {
+			issues = append(issues, fmt.Sprintf(
+				"Feature %s has %d validation_refs (target 2-5). Consider splitting to improve worker success rate.",
+				fid, len(f.ValidationRefs)))
+		}
 		scope := strings.TrimSpace(f.Scope)
 		if scope == "" {
 			issues = append(issues, fmt.Sprintf(

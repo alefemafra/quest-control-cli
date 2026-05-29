@@ -89,11 +89,13 @@ pattern matching and file path guidance.
 
 **Principles:**
 
-- Each feature completable in **ONE worker session** (1-3 FRs, 3-8 assertions)
+- Each feature completable in **ONE worker session** (1-4 FRs, 2-5 assertions)
 - Each feature **independently validatable** (unless declared in `depends_on`)
 - Order by **dependency**: schemas → hooks → components → integration → polish
-- Feature with >8 `validation_refs` → split it
+- Feature with >5 `validation_refs` → split it. Target 2-5 refs per feature.
+- Feature with >6 `validation_refs` → MUST split. Workers fail reliably above this threshold.
 - Feature with 0 `validation_refs` → unclear scope, every feature must be validatable
+- Prefer more focused features over fewer large ones
 - `depends_on` must be accurate
 
 **Phase model:**

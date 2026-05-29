@@ -151,7 +151,7 @@ func RunMechanicalChecks(specDir, projectDir string) (*MechanicalResult, error) 
 
 const maxCriticRetries = 2
 
-func RunCriticGate(projectDir, missionDir string, verbose *bool, eventCh chan WorkerEvent) {
+func RunCriticGate(projectDir, missionDir string, verbose *bool, eventCh chan WorkerEvent, costTracker *CostTracker) {
 	specDir := filepath.Dir(missionDir)
 
 	eventCh <- WorkerEvent{Role: "critic", Line: "▶ Running mechanical checks..."}
@@ -231,7 +231,7 @@ func RunCriticGate(projectDir, missionDir string, verbose *bool, eventCh chan Wo
 			eventCh <- WorkerEvent{Role: "critic", Line: fmt.Sprintf("[%s] ▶ %s phase started", p.ID, p.Name)}
 			prompt := BuildCriticPhasePrompt(specDir, p)
 			sessionKey := autonomousSessionKey("critic", "phase-"+p.ID)
-			rep, err := runCriticPhaseJudgment(p, prompt, projectDir, missionDir, sessionKey, verbose, eventCh)
+			rep, err := runCriticPhaseJudgment(p, prompt, projectDir, missionDir, sessionKey, verbose, eventCh, costTracker)
 			reports[i] = rep
 			errs[i] = err
 			if err != nil {
@@ -450,7 +450,7 @@ func firstCriterion(label string) string {
 // runCriticPhaseJudgment runs one critic phase end-to-end (prompt + parse +
 // retry). It mirrors runCriticJudgment but prefixes every streamed line with
 // the phase ID so the unified critic log distinguishes the three streams.
-func runCriticPhaseJudgment(phase criticPhase, prompt, projectDir, missionDir, sessionKey string, verbose *bool, eventCh chan WorkerEvent) (*CriticReport, error) {
+func runCriticPhaseJudgment(phase criticPhase, prompt, projectDir, missionDir, sessionKey string, verbose *bool, eventCh chan WorkerEvent, costTracker *CostTracker) (*CriticReport, error) {
 	prefix := fmt.Sprintf("[%s] ", phase.ID)
 	emit := func(line string) {
 		eventCh <- WorkerEvent{Role: "critic", Line: prefix + line}
@@ -462,7 +462,7 @@ func runCriticPhaseJudgment(phase criticPhase, prompt, projectDir, missionDir, s
 		if retry > 0 {
 			emit(fmt.Sprintf("⚠ Retrying judgment (%d/%d)...", retry, maxCriticRetries))
 		}
-		resultText, err := runCriticPhaseSubprocess(prompt, projectDir, missionDir, sessionKey, verbose, eventCh, prefix)
+		resultText, err := runCriticPhaseSubprocess(prompt, projectDir, missionDir, sessionKey, verbose, eventCh, prefix, costTracker)
 		if err != nil {
 			lastErr = err
 			emit(fmt.Sprintf("✕ Critic error: %s", err))
@@ -609,7 +609,7 @@ const criticPhaseTimeout = 3 * time.Minute
 // and a hard wall-clock timeout protects against internal reasoning stalls.
 // A timeout surfaces as a real error so the merge step turns it into a
 // synthetic phase-X-error finding instead of leaving the whole gate hanging.
-func runCriticPhaseSubprocess(prompt, projectDir, missionDir, sessionKey string, verbose *bool, eventCh chan WorkerEvent, prefix string) (string, error) {
+func runCriticPhaseSubprocess(prompt, projectDir, missionDir, sessionKey string, verbose *bool, eventCh chan WorkerEvent, prefix string, costTracker *CostTracker) (string, error) {
 	claudeCh := make(chan ClaudeStreamMsg, 64)
 	criticArgs := []string{
 		"--allowedTools", "Read",
@@ -680,6 +680,18 @@ func runCriticPhaseSubprocess(prompt, projectDir, missionDir, sessionKey string,
 				eventCh <- WorkerEvent{Role: "critic", Line: prefix + msg.Line}
 			}
 			if msg.Done {
+				if costTracker != nil {
+					costTracker.Record(CostRecord{
+						Model:               msg.Model,
+						Role:                "critic",
+						Phase:               -1,
+						InputTokens:         msg.InputTokens,
+						OutputTokens:        msg.OutputTokens,
+						CacheCreationTokens: msg.CacheCreationTokens,
+						CacheReadTokens:     msg.CacheReadTokens,
+						CostUSD:             msg.CostUSD,
+					})
+				}
 				if msg.SessionID != "" {
 					lastSessionID = msg.SessionID
 					if missionDir != "" && sessionKey != "" {

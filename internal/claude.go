@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 )
 
 var transientStreamPatterns = []string{
@@ -41,6 +43,7 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 	}
 	cmd := exec.Command("claude", args...)
 	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -62,6 +65,8 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 		var resultText string
 		var sessionID string
 		var streamError string
+		var model string
+		var usage streamUsage
 		parser := &streamParser{verbose: verbose}
 
 		for scanner.Scan() {
@@ -79,10 +84,15 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 				sessionID = sid
 			}
 
+			if mdl := extractInitModel(ev); mdl != "" {
+				model = mdl
+			}
+
 			if evType, _ := ev["type"].(string); evType == "result" {
 				if r, ok := ev["result"].(string); ok {
 					resultText = r
 				}
+				usage = extractStreamUsage(ev)
 			}
 
 			lines := parser.parse(ev)
@@ -103,9 +113,27 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 		}
 
 		waitErr := cmd.Wait()
+		// Kill any orphaned children (MCP servers) left in the process group
+		go cleanupProcessGroup(cmd.Process.Pid)
+
+		doneMsg := func(err error) ClaudeStreamMsg {
+			return ClaudeStreamMsg{
+				Done:                true,
+				Result:              resultText,
+				SessionID:           sessionID,
+				Err:                 err,
+				Model:               model,
+				InputTokens:         usage.input,
+				OutputTokens:        usage.output,
+				CacheCreationTokens: usage.cacheCreation,
+				CacheReadTokens:     usage.cacheRead,
+				CostUSD:             usage.cost,
+			}
+		}
+
 		if waitErr != nil {
 			if resultText != "" && streamError == "" {
-				ch <- ClaudeStreamMsg{Done: true, Result: resultText, SessionID: sessionID}
+				ch <- doneMsg(nil)
 				return
 			}
 			errMsg := fmt.Sprintf("claude process exited: %v", waitErr)
@@ -119,19 +147,88 @@ func StartClaude(prompt, cwd string, verbose *bool, ch chan ClaudeStreamMsg, ext
 				}
 				errMsg = last
 			}
-			ch <- ClaudeStreamMsg{Done: true, Err: fmt.Errorf("%s", errMsg), Result: resultText, SessionID: sessionID}
+			ch <- doneMsg(fmt.Errorf("%s", errMsg))
 		} else {
-			ch <- ClaudeStreamMsg{Done: true, Result: resultText, SessionID: sessionID}
+			ch <- doneMsg(nil)
 		}
 	}()
 
 	return cmd
 }
 
+// StopClaude kills the claude process and all its children (MCP servers, etc.)
+// by sending SIGTERM to the entire process group, then SIGKILL after a short
+// grace period to catch lingering children.
 func StopClaude(cmd *exec.Cmd) {
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
+	if cmd == nil || cmd.Process == nil {
+		return
 	}
+	killProcessGroup(cmd.Process.Pid)
+}
+
+// killProcessGroup sends SIGTERM to a process group, waits briefly, then SIGKILL.
+func killProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	go func() {
+		time.Sleep(3 * time.Second)
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+	}()
+}
+
+// cleanupProcessGroup sends SIGTERM+SIGKILL to a process group to kill any
+// orphaned children (e.g. MCP servers) left after the leader exits normally.
+func cleanupProcessGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	time.Sleep(1 * time.Second)
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+}
+
+// streamUsage holds token/cost totals parsed from a stream-json `result` event.
+type streamUsage struct {
+	input         int
+	output        int
+	cacheCreation int
+	cacheRead     int
+	cost          float64
+}
+
+// extractStreamUsage reads the cost and token usage from a `result` event.
+// It tolerates both the current (`total_cost_usd`) and legacy (`cost_usd`)
+// cost field names.
+func extractStreamUsage(ev map[string]any) streamUsage {
+	var u streamUsage
+	if c, ok := ev["total_cost_usd"].(float64); ok {
+		u.cost = c
+	} else if c, ok := ev["cost_usd"].(float64); ok {
+		u.cost = c
+	}
+	if usage, ok := ev["usage"].(map[string]any); ok {
+		u.input = intField(usage, "input_tokens")
+		u.output = intField(usage, "output_tokens")
+		u.cacheCreation = intField(usage, "cache_creation_input_tokens")
+		u.cacheRead = intField(usage, "cache_read_input_tokens")
+	}
+	return u
+}
+
+// extractInitModel returns the model id reported by the `system`/`init` event,
+// or "" for any other event.
+func extractInitModel(ev map[string]any) string {
+	if t, _ := ev["type"].(string); t != "system" {
+		return ""
+	}
+	if sub, _ := ev["subtype"].(string); sub != "init" {
+		return ""
+	}
+	m, _ := ev["model"].(string)
+	return m
+}
+
+func intField(m map[string]any, key string) int {
+	if v, ok := m[key].(float64); ok {
+		return int(v)
+	}
+	return 0
 }
 
 type streamParser struct {
@@ -340,7 +437,7 @@ func (p *streamParser) parse(ev map[string]any) []string {
 			turns = fmt.Sprintf(" (%d turns)", int(n))
 		}
 		cost := ""
-		if c, ok := ev["cost_usd"].(float64); ok {
+		if c := extractStreamUsage(ev).cost; c > 0 {
 			cost = fmt.Sprintf(" · $%.2f", c)
 		}
 		return []string{fmt.Sprintf("✓ Done%s%s", turns, cost)}
@@ -519,6 +616,35 @@ func BuildPlanPrompt(messages []ChatMessage, projectDir string) string {
 		"",
 		"1. Use the project context above — read additional files only if needed for deeper understanding",
 		"2. Derive assertions from EVERY requirement discussed above (follow the skill's quality bar)",
+		"3. Decompose into features with detailed scope (follow the skill's decomposition principles)",
+		"4. Output ONLY the JSON object — no markdown, no explanation, no code fences",
+	}, "\n")
+}
+
+// BuildPlanPromptResume is the --resume variant of BuildPlanPrompt: the live
+// session already holds the requirements conversation, so it omits the
+// transcript and relies on the session's own memory of it.
+func BuildPlanPromptResume(projectDir string) string {
+	skill := ReadSkill("spec-to-quest")
+	projectContext := GatherProjectContext(projectDir)
+
+	return strings.Join([]string{
+		"The requirements conversation above (in this session) is approved. Create a complete mission plan from it now.",
+		"",
+		"## Project Context",
+		"",
+		projectContext,
+		"",
+		"## Skill Reference (spec-to-quest methodology)",
+		"",
+		"Follow the assertion derivation rules and feature decomposition principles from this skill:",
+		"",
+		skill,
+		"",
+		"## Execution",
+		"",
+		"1. Use the approved requirements from our conversation above and the project context",
+		"2. Derive assertions from EVERY requirement discussed (follow the skill's quality bar)",
 		"3. Decompose into features with detailed scope (follow the skill's decomposition principles)",
 		"4. Output ONLY the JSON object — no markdown, no explanation, no code fences",
 	}, "\n")
@@ -1979,6 +2105,52 @@ func BuildEditPlanPrompt(messages []ChatMessage, specDir, projectDir string) str
 		"",
 		"## Change Conversation",
 		history.String(),
+		"## Output",
+		"",
+		"Output ONLY a valid JSON object (no markdown, no explanation, no code fences) matching this exact schema:",
+		`{"slug":"` + slug + `","spec":"docs/specs/` + slug + `/spec.md","project":"<name>","owner":"<owner>","features":[...],"assertions":[...],"knowledge":[...]}`,
+		"",
+		"Rules:",
+		"- slug MUST be: " + slug,
+		"- PRESERVE all features with status 'done', 'in_progress', 'awaiting_validation', or 'blocked' — do NOT remove or modify them",
+		"- ADD new features with IDs continuing from the existing sequence",
+		"- UPDATE assertions: keep existing ones, add new ones as needed",
+		"- New features must have validation_refs pointing to assertions",
+		"- Preserve fix lineage from existing features.json; do not reuse IDs that collide with existing features or fix_features",
+		"- Output ONLY the JSON object, nothing else",
+	}, "\n")
+}
+
+// BuildEditPlanPromptResume is the --resume variant of BuildEditPlanPrompt: the
+// live session already holds the change conversation, so it omits the transcript.
+func BuildEditPlanPromptResume(specDir, projectDir string) string {
+	specSkill := ReadSkill("quest-spec")
+	missionDir := ResolveArtifactDir(specDir)
+	slug := filepath.Base(specDir)
+	projectContext := loadProjectContext(missionDir, projectDir)
+
+	featuresContent := readFileContent(filepath.Join(missionDir, "features.json"))
+	contractContent := readFileContent(filepath.Join(missionDir, "validation-contract.md"))
+
+	return strings.Join([]string{
+		"The change conversation above (in this session) is approved. UPDATE the existing mission spec from it now.",
+		"",
+		"## Project Context",
+		"",
+		projectContext,
+		"",
+		"## Existing Features",
+		"",
+		featuresContent,
+		"",
+		"## Existing Validation Contract",
+		"",
+		contractContent,
+		"",
+		"## Skill Reference (quest-spec methodology)",
+		"",
+		specSkill,
+		"",
 		"## Output",
 		"",
 		"Output ONLY a valid JSON object (no markdown, no explanation, no code fences) matching this exact schema:",

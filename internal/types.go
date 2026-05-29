@@ -17,9 +17,10 @@ const (
 	TabKanban
 	TabLog
 	TabDiagram
+	TabCost
 )
 
-var TabOrder = []Tab{TabOverview, TabKanban, TabLog, TabDiagram}
+var TabOrder = []Tab{TabOverview, TabKanban, TabLog, TabDiagram, TabCost}
 
 type ReviewTab int
 
@@ -146,6 +147,15 @@ type ClaudeStreamMsg struct {
 	Result    string
 	Err       error
 	SessionID string
+
+	// Cost/usage captured from the stream-json `system/init` (model) and
+	// `result` (usage + total_cost_usd) events. Populated only on Done.
+	Model               string
+	InputTokens         int
+	OutputTokens        int
+	CacheCreationTokens int
+	CacheReadTokens     int
+	CostUSD             float64
 }
 
 type WorkerEvent struct {
