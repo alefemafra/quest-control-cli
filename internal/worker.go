@@ -105,9 +105,29 @@ type WorkerPool struct {
 	autonomousState     AutonomousRuntimeState
 	autonomousMode      bool
 	criticAutoFixFn     func(report *CriticReport) error
+	costTracker         *CostTracker
 }
 
-func NewWorkerPool(projectDir, missionDir string, features []Feature, logger *MissionLogger, verbose *bool) *WorkerPool {
+// recordCost logs a completed Claude call's token/cost usage into the cost
+// tracker (if one is attached), tagged with the call's role/feature/phase.
+func (wp *WorkerPool) recordCost(msg ClaudeStreamMsg, role, featureID string, phase int) {
+	if wp.costTracker == nil {
+		return
+	}
+	wp.costTracker.Record(CostRecord{
+		Model:               msg.Model,
+		Role:                role,
+		FeatureID:           featureID,
+		Phase:               phase,
+		InputTokens:         msg.InputTokens,
+		OutputTokens:        msg.OutputTokens,
+		CacheCreationTokens: msg.CacheCreationTokens,
+		CacheReadTokens:     msg.CacheReadTokens,
+		CostUSD:             msg.CostUSD,
+	})
+}
+
+func NewWorkerPool(projectDir, missionDir string, features []Feature, logger *MissionLogger, verbose *bool, costTracker *CostTracker) *WorkerPool {
 	state := loadAutonomousRuntimeState(missionDir)
 
 	workers := make(map[string]*FeatureWorker)
@@ -142,6 +162,7 @@ func NewWorkerPool(projectDir, missionDir string, features []Feature, logger *Mi
 		fixAttemptsByRoot:   loadFixAttemptBudgets(missionDir, features),
 		maxFixAttempts:      defaultMaxFixAttemptsPerRoot,
 		autonomousState:     state,
+		costTracker:         costTracker,
 	}
 	wp.criticAutoFixFn = wp.runInitialCriticAutoFix
 	return wp
@@ -268,7 +289,7 @@ func (wp *WorkerPool) minPhase() (int, bool) {
 
 func (wp *WorkerPool) runInitialCriticGateOnce() (bool, *CriticReport) {
 	criticCh := make(chan WorkerEvent, 64)
-	go RunCriticGate(wp.projectDir, wp.missionDir, wp.verbose, criticCh)
+	go RunCriticGate(wp.projectDir, wp.missionDir, wp.verbose, criticCh, wp.costTracker)
 
 	var passed bool
 	var report *CriticReport
@@ -1039,6 +1060,7 @@ func (wp *WorkerPool) runWorkerLoop(feature Feature, ch chan ClaudeStreamMsg, co
 		}
 
 		if msg.Done {
+			wp.recordCost(msg, "worker", feature.ID, feature.Phase)
 			if msg.SessionID != "" {
 				wp.rememberAutonomousSession("worker", feature.ID, msg.SessionID)
 			}
@@ -1417,6 +1439,7 @@ func (wp *WorkerPool) runValidatorWithResume(feature Feature, contract, resumeSe
 			}
 		}
 		if msg.Done {
+			wp.recordCost(msg, "validator", feature.ID, feature.Phase)
 			if msg.SessionID != "" {
 				wp.rememberAutonomousSession("validator", feature.ID, msg.SessionID)
 			}
@@ -1754,6 +1777,7 @@ func (wp *WorkerPool) runRefinementWithResume(feature Feature, report ValidatorR
 			}
 		}
 		if msg.Done {
+			wp.recordCost(msg, "refinement", feature.ID, feature.Phase)
 			if msg.SessionID != "" {
 				wp.rememberAutonomousSession("refinement", feature.ID, msg.SessionID)
 			}

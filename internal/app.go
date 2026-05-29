@@ -115,6 +115,12 @@ type Model struct {
 	criticLoopCh    chan criticLoopMsg
 	criticStreamCh  chan criticStreamMsg
 
+	// Cost/token tracking. costTracker is bound to a mission once its
+	// missionDir exists; records produced before that (first-time discovery /
+	// plan generation) are buffered in pendingCostRecords and flushed on bind.
+	costTracker        *CostTracker
+	pendingCostRecords []CostRecord
+
 	styles Styles
 }
 
@@ -374,9 +380,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.workerLogs) > 10000 {
 				m.workerLogs = m.workerLogs[len(m.workerLogs)-10000:]
 			}
+			wasAtTop := m.viewport.AtTop()
 			m.updateDashboardContent()
-			if m.activeTab == TabLog {
-				m.viewport.GotoBottom()
+			if m.activeTab == TabLog && wasAtTop {
+				m.viewport.GotoTop()
 			}
 		}
 		return m, listenAutoFix(m.autoFixCh)
@@ -1187,10 +1194,14 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.activeTab = TabLog
 		m.logFilter = -1
 		m.updateDashboardContent()
-		m.viewport.GotoBottom()
+		m.viewport.GotoTop()
 	case "d":
 		m.activeTab = TabDiagram
 		m.updateDashboardContent()
+	case "c":
+		m.activeTab = TabCost
+		m.updateDashboardContent()
+		m.viewport.GotoTop()
 	case "left":
 		if m.activeTab == TabLog && len(m.mission.Features) > 0 {
 			m.logFilter--
@@ -1198,7 +1209,7 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.logFilter = len(m.mission.Features) - 1
 			}
 			m.updateDashboardContent()
-			m.viewport.GotoBottom()
+			m.viewport.GotoTop()
 			return m, nil
 		}
 	case "right":
@@ -1208,7 +1219,7 @@ func (m Model) handleDashboardKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.logFilter = -1
 			}
 			m.updateDashboardContent()
-			m.viewport.GotoBottom()
+			m.viewport.GotoTop()
 			return m, nil
 		}
 	case "tab":
@@ -2161,11 +2172,19 @@ func (m Model) sendDiscoveryFeedback(feedback string) (tea.Model, tea.Cmd) {
 
 	ch := make(chan ClaudeStreamMsg, 64)
 	m.claudeCh = ch
-	m.lastPrompt = BuildFollowUpPrompt(m.discoveryMsgs, feedback, m.projectDir)
 	m.claudeRetries = 0
-	m.claudeSessionID = ""
 	m.claudeResumeHint = ""
-	m.claudeCmd = StartClaude(m.lastPrompt, m.projectDir, &m.verbose, ch)
+	// Keep a full-context prompt as the retry fallback regardless of path, in
+	// case the session can't be resumed (e.g. it expired server-side).
+	m.lastPrompt = BuildFollowUpPrompt(m.discoveryMsgs, feedback, m.projectDir)
+	if m.claudeSessionID != "" {
+		// Continuous session: the resumed conversation already holds the skill,
+		// project context, and full history — send only the new user message.
+		m.claudeCmd = StartClaude(feedback, m.projectDir, &m.verbose, ch, "--resume", m.claudeSessionID)
+	} else {
+		// No live session yet — replay the transcript as a flat prompt.
+		m.claudeCmd = StartClaude(m.lastPrompt, m.projectDir, &m.verbose, ch)
+	}
 
 	m.viewport.SetContent(m.renderChatContent())
 	m.viewport.GotoBottom()
@@ -2186,15 +2205,27 @@ func (m Model) approveRequirements() (tea.Model, tea.Cmd) {
 
 	ch := make(chan ClaudeStreamMsg, 64)
 	m.claudeCh = ch
-	if m.editingSpec && m.activeSpec != nil {
+	editing := m.editingSpec && m.activeSpec != nil
+	// Full-context prompt kept as the retry fallback regardless of path.
+	if editing {
 		m.lastPrompt = BuildEditPlanPrompt(m.discoveryMsgs, m.activeSpec.SpecPath, m.projectDir)
 	} else {
 		m.lastPrompt = BuildPlanPrompt(m.discoveryMsgs, m.projectDir)
 	}
 	m.claudeRetries = 0
-	m.claudeSessionID = ""
 	m.claudeResumeHint = ""
-	m.claudeCmd = StartClaude(m.lastPrompt, m.projectDir, &m.verbose, ch)
+	if m.claudeSessionID != "" {
+		// Resume the discovery session: it already holds the full requirements
+		// conversation, so generate the plan from its own memory rather than
+		// replaying a flattened transcript.
+		resumePrompt := BuildPlanPromptResume(m.projectDir)
+		if editing {
+			resumePrompt = BuildEditPlanPromptResume(m.activeSpec.SpecPath, m.projectDir)
+		}
+		m.claudeCmd = StartClaude(resumePrompt, m.projectDir, &m.verbose, ch, "--resume", m.claudeSessionID)
+	} else {
+		m.claudeCmd = StartClaude(m.lastPrompt, m.projectDir, &m.verbose, ch)
+	}
 
 	m.discoveryMsgs = append(m.discoveryMsgs, ChatMessage{Role: "system", Text: "Requirements approved. Generating quest plan..."})
 	m.viewport.SetContent(m.renderChatContent())
@@ -2249,7 +2280,8 @@ func (m Model) approvePlan() (tea.Model, tea.Cmd) {
 	m.workerLogs = nil
 	m.logFilter = -1
 
-	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose)
+	m.bindCostTracker(m.missionDir)
+	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose, m.costTracker)
 	pool.autonomousMode = true
 	m.workerPool = pool
 
@@ -2284,7 +2316,8 @@ func (m Model) startWorkers() (tea.Model, tea.Cmd) {
 	m.workerLogs = nil
 	m.logFilter = -1
 
-	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose)
+	m.bindCostTracker(m.missionDir)
+	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose, m.costTracker)
 	pool.autonomousMode = true
 	m.workerPool = pool
 
@@ -2318,9 +2351,22 @@ func (m Model) startAutoFix() (tea.Model, tea.Cmd) {
 	)
 	m.claudeCmd = cmd
 
+	costTracker := m.costTracker
 	go func() {
 		for msg := range claudeCh {
 			if msg.Done {
+				if costTracker != nil {
+					costTracker.Record(CostRecord{
+						Model:               msg.Model,
+						Role:                "autofix",
+						Phase:               -1,
+						InputTokens:         msg.InputTokens,
+						OutputTokens:        msg.OutputTokens,
+						CacheCreationTokens: msg.CacheCreationTokens,
+						CacheReadTokens:     msg.CacheReadTokens,
+						CostUSD:             msg.CostUSD,
+					})
+				}
 				afCh <- autoFixEventMsg{done: true, err: msg.Err}
 				close(afCh)
 				return
@@ -2358,7 +2404,8 @@ func (m Model) startWorkersSkipCritic() (tea.Model, tea.Cmd) {
 	m.workerLogs = append(m.workerLogs, "[ORCH] ⚠ Critic bypassed — starting workers directly")
 	m.logFilter = -1
 
-	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose)
+	m.bindCostTracker(m.missionDir)
+	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose, m.costTracker)
 	pool.skipCritic = true
 	pool.autonomousMode = true
 	m.workerPool = pool
@@ -2374,6 +2421,11 @@ func (m Model) startCriticLoop() (tea.Model, tea.Cmd) {
 	m.claudeStartTime = time.Now()
 	m.criticPassed = false
 	m.criticBypassed = false
+
+	// The mission directory now exists; bind the cost tracker (flushing any
+	// discovery/plan-generation costs buffered before it existed) so the
+	// critic and all later calls record live.
+	m.bindCostTracker(m.missionDir)
 
 	if m.changesMode {
 		m.discoveryMsgs = append(m.discoveryMsgs, ChatMessage{Role: "system", Text: "PHASE_START_CHANGES:4"})
@@ -2397,11 +2449,12 @@ func (m Model) startCriticLoop() (tea.Model, tea.Cmd) {
 	projectDir := m.projectDir
 	verbose := m.verbose
 	attempt := m.criticLoopCount
+	costTracker := m.costTracker
 
 	go func() {
 		eventCh := make(chan WorkerEvent, 64)
 
-		go RunCriticGate(projectDir, ResolveArtifactDir(specDir), &verbose, eventCh)
+		go RunCriticGate(projectDir, ResolveArtifactDir(specDir), &verbose, eventCh, costTracker)
 
 		var report *CriticReport
 		var verdict string
@@ -2670,7 +2723,8 @@ func (m Model) startWorkersAfterCritic() (tea.Model, tea.Cmd) {
 	m.workerLogs = nil
 	m.logFilter = -1
 
-	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose)
+	m.bindCostTracker(m.missionDir)
+	pool := NewWorkerPool(m.projectDir, m.missionDir, pending, logger, &m.verbose, m.costTracker)
 	pool.skipCritic = true
 	pool.autonomousMode = true
 	m.workerPool = pool
@@ -2701,6 +2755,7 @@ func (m Model) startAdvisoryFix(findings []CriticFinding) (tea.Model, tea.Cmd) {
 
 	specDir := filepath.Dir(m.missionDir)
 	projectDir := m.projectDir
+	costTracker := m.costTracker
 
 	return m, func() tea.Msg {
 		prompt := BuildAdvisoryAutoFixPrompt(findings, specDir, projectDir)
@@ -2718,6 +2773,18 @@ func (m Model) startAdvisoryFix(findings []CriticFinding) (tea.Model, tea.Cmd) {
 		for msg := range ch {
 			if msg.Done {
 				lastErr = msg.Err
+				if costTracker != nil {
+					costTracker.Record(CostRecord{
+						Model:               msg.Model,
+						Role:                "autofix",
+						Phase:               -1,
+						InputTokens:         msg.InputTokens,
+						OutputTokens:        msg.OutputTokens,
+						CacheCreationTokens: msg.CacheCreationTokens,
+						CacheReadTokens:     msg.CacheReadTokens,
+						CostUSD:             msg.CostUSD,
+					})
+				}
 				break
 			}
 		}
@@ -2923,7 +2990,8 @@ func (m Model) startSingleWorker(featureID string) (tea.Model, tea.Cmd) {
 	m.logger = logger
 	m.executing = true
 
-	pool := NewWorkerPool(m.projectDir, m.missionDir, target, logger, &m.verbose)
+	m.bindCostTracker(m.missionDir)
+	pool := NewWorkerPool(m.projectDir, m.missionDir, target, logger, &m.verbose, m.costTracker)
 	m.workerPool = pool
 	m.workerLogs = append(m.workerLogs, fmt.Sprintf("[ORCH] Retrying %s — %s", featureID, target[0].Title))
 	m.updateDashboardContent()
@@ -3006,9 +3074,77 @@ func (m Model) retryClaudeWithDelay() (tea.Model, tea.Cmd) {
 	})
 }
 
+// bindCostTracker attaches a cost tracker for missionDir (loading any persisted
+// records) and flushes records buffered before the directory existed. Idempotent:
+// it only reloads when the target path changes.
+func (m *Model) bindCostTracker(missionDir string) {
+	if missionDir == "" {
+		return
+	}
+	want := filepath.Join(missionDir, costFileName)
+	if m.costTracker == nil || m.costTracker.path != want {
+		m.costTracker = LoadCostTracker(missionDir)
+	}
+	if len(m.pendingCostRecords) > 0 {
+		m.costTracker.RecordMany(m.pendingCostRecords)
+		m.pendingCostRecords = nil
+	}
+}
+
+// currentClaudeRole maps the current TUI phase to a cost role for Claude calls
+// that flow through handleClaudeStream (discovery and plan generation).
+func (m Model) currentClaudeRole() string {
+	if m.phase == PhaseDiscovery {
+		return "discovery"
+	}
+	switch m.genPhase {
+	case GenPhaseAnalysis:
+		return "analysis"
+	case GenPhaseAssertions:
+		return "assertions"
+	case GenPhaseFeatures:
+		return "features"
+	case GenPhaseKnowledge:
+		return "knowledge"
+	case GenPhaseCritic, GenPhaseFixLoop:
+		return "critic"
+	default:
+		return "plan"
+	}
+}
+
+// recordClaudeCost records a finished Claude call's usage. With no tracker bound
+// yet (first-time discovery / plan generation before missionDir exists) it
+// buffers the record for a later flush by bindCostTracker.
+func (m *Model) recordClaudeCost(msg ClaudeStreamMsg, role string) {
+	rec := CostRecord{
+		Model:               msg.Model,
+		Role:                role,
+		Phase:               -1,
+		InputTokens:         msg.InputTokens,
+		OutputTokens:        msg.OutputTokens,
+		CacheCreationTokens: msg.CacheCreationTokens,
+		CacheReadTokens:     msg.CacheReadTokens,
+		CostUSD:             msg.CostUSD,
+	}
+	if rec.CostUSD == 0 && rec.InputTokens == 0 && rec.OutputTokens == 0 &&
+		rec.CacheCreationTokens == 0 && rec.CacheReadTokens == 0 {
+		return
+	}
+	if m.costTracker != nil {
+		m.costTracker.Record(rec)
+		return
+	}
+	rec.Ts = time.Now().UTC().Format(time.RFC3339)
+	m.pendingCostRecords = append(m.pendingCostRecords, rec)
+}
+
 func (m Model) handleClaudeStream(msg ClaudeStreamMsg) (tea.Model, tea.Cmd) {
 	if msg.SessionID != "" {
 		m.claudeSessionID = msg.SessionID
+	}
+	if msg.Done {
+		m.recordClaudeCost(msg, m.currentClaudeRole())
 	}
 
 	if msg.Err != nil {
@@ -3338,7 +3474,14 @@ func (m Model) handleWorkerEvent(ev WorkerEvent) (tea.Model, tea.Cmd) {
 		)
 	}
 
+	// Newest log lines render at the top; keep the view pinned there while the
+	// user is already at the top, but don't yank them back if they scrolled
+	// down to read older output.
+	wasAtTop := m.viewport.AtTop()
 	m.updateDashboardContent()
+	if m.activeTab == TabLog && wasAtTop {
+		m.viewport.GotoTop()
+	}
 	return m, listenWorker(m.workerPool.eventCh)
 }
 
@@ -4111,6 +4254,7 @@ func (m Model) renderReviewCritic() string {
 }
 
 func (m *Model) updateDashboardContent() {
+	m.bindCostTracker(m.missionDir)
 	switch m.activeTab {
 	case TabOverview:
 		m.viewport.SetContent(m.renderOverviewTab())
@@ -4120,6 +4264,8 @@ func (m *Model) updateDashboardContent() {
 		m.viewport.SetContent(m.renderLogTab())
 	case TabDiagram:
 		m.viewport.SetContent(m.renderDiagramTab())
+	case TabCost:
+		m.viewport.SetContent(m.renderCostTab())
 	}
 }
 
@@ -4616,7 +4762,10 @@ func (m Model) renderLogTab() string {
 		filterPrefix = fmt.Sprintf("[%s]", m.mission.Features[m.logFilter].ID)
 	}
 
-	for _, line := range m.workerLogs {
+	// Render newest-first: the latest line sits at the top so new output is
+	// visible without scrolling to the bottom.
+	for i := len(m.workerLogs) - 1; i >= 0; i-- {
+		line := m.workerLogs[i]
 		if filterPrefix != "" && !strings.HasPrefix(line, filterPrefix) {
 			continue
 		}
@@ -4650,6 +4799,100 @@ func (m Model) renderLogTab() string {
 	}
 
 	return sb.String()
+}
+
+func (m Model) renderCostTab() string {
+	var sb strings.Builder
+	sb.WriteString("  " + m.styles.Cyan.Render("Cost & Tokens"))
+	sb.WriteString("\n")
+	sb.WriteString(m.styles.Dim.Render("  accumulated across runs · persisted to quest/cost.json"))
+	sb.WriteString("\n\n")
+
+	var records []CostRecord
+	if m.costTracker != nil {
+		records = m.costTracker.Records()
+	}
+	if len(records) == 0 {
+		sb.WriteString(m.styles.Dim.Render("  No cost data yet — run the mission to populate."))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	total := CostTotals(records)
+	sb.WriteString(fmt.Sprintf("  %s $%.4f   ·   %d calls\n",
+		m.styles.Title.Render("Total:"), total.Cost, total.Calls))
+	sb.WriteString(fmt.Sprintf("  %s in %s · out %s · cache %s\n\n",
+		m.styles.Dim.Render("tokens:"),
+		fmtTokens(total.Input), fmtTokens(total.Output), fmtTokens(total.Cache)))
+
+	writeCostSection(&sb, m.styles, "By model", "Model",
+		AggregateCostBy(records, func(r CostRecord) string {
+			if r.Model == "" {
+				return "(default)"
+			}
+			return r.Model
+		}))
+
+	writeCostSection(&sb, m.styles, "By role", "Role",
+		AggregateCostBy(records, func(r CostRecord) string { return r.Role }))
+
+	phaseNames := []string{"Foundation", "Core", "Polish", "Extras"}
+	writeCostSection(&sb, m.styles, "By phase", "Phase",
+		AggregateCostBy(records, func(r CostRecord) string {
+			if r.Phase < 0 {
+				return "Planning"
+			}
+			if r.Phase < len(phaseNames) {
+				return phaseNames[r.Phase]
+			}
+			return fmt.Sprintf("Phase %d", r.Phase)
+		}))
+
+	titles := map[string]string{}
+	for _, f := range m.mission.Features {
+		titles[f.ID] = f.Title
+	}
+	byFeature := AggregateCostBy(records, func(r CostRecord) string { return r.FeatureID })
+	for i := range byFeature {
+		if t := titles[byFeature[i].Key]; t != "" {
+			byFeature[i].Key = byFeature[i].Key + " — " + t
+		}
+	}
+	writeCostSection(&sb, m.styles, "By feature", "Feature", byFeature)
+
+	return sb.String()
+}
+
+// fmtTokens renders a token count compactly (1.2k, 3.4M).
+func fmtTokens(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+func writeCostSection(sb *strings.Builder, styles Styles, title, keyHeader string, rows []CostRollup) {
+	if len(rows) == 0 {
+		return
+	}
+	sb.WriteString("  " + styles.Cyan.Render(title) + "\n")
+	sb.WriteString(styles.Dim.Render(fmt.Sprintf("    %-30s %6s %8s %8s %8s %11s",
+		keyHeader, "calls", "in", "out", "cache", "cost")))
+	sb.WriteString("\n")
+	for _, r := range rows {
+		key := r.Key
+		if len(key) > 30 {
+			key = key[:29] + "…"
+		}
+		sb.WriteString(fmt.Sprintf("    %-30s %6d %8s %8s %8s %11s\n",
+			key, r.Calls, fmtTokens(r.Input), fmtTokens(r.Output), fmtTokens(r.Cache),
+			fmt.Sprintf("$%.4f", r.Cost)))
+	}
+	sb.WriteString("\n")
 }
 
 func (m Model) renderDiagramTab() string {
@@ -4769,6 +5012,7 @@ func (m Model) dashboardView() string {
 		{"K", "Kanban", TabKanban},
 		{"L", "Log", TabLog},
 		{"D", "Diagram", TabDiagram},
+		{"C", "Cost", TabCost},
 	}
 	var tabParts []string
 	for _, t := range tabs {
