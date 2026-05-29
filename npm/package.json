@@ -1,5 +1,5 @@
 {
-  "name": "quest-cli",
+  "name": "quest-control-cli",
   "version": "0.0.0",
   "description": "Quest — spec-driven development mission orchestrator",
   "bin": {

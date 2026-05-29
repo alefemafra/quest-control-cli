@@ -1,4 +1,4 @@
-# quest-cli
+# quest-control-cli
 
 Quest — spec-driven development mission orchestrator.
 
@@ -7,7 +7,7 @@ A TUI that orchestrates spec-driven development missions by spawning Claude Code
 ## Install
 
 ```bash
-npm install -g quest-cli
+npm install -g quest-control-cli
 ```
 
 ## Usage
